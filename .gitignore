@@ -24,3 +24,10 @@ target
 # Added by cargo
 
 /target
+
+
+/target
+
+esp
+debug.log
+OVMF_VARS.fd
