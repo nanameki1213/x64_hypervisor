@@ -30,7 +30,7 @@ pub struct Elf64Phdr {
 
 pub const PT_LOAD: u32 = 1;
 
-pub fn load_elf<'a>(base_address: *const u64) -> u64 {
+pub fn load_elf(base_address: *const u64) -> u64 {
     unsafe {
         let ehdr = base_address as *const Elf64Ehdr;
         let e_phoff = (*ehdr).e_phoff;

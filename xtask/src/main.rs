@@ -29,7 +29,7 @@ fn try_main() -> Result<(), DynError> {
 
 fn build() -> Result<(), DynError> {
     build_bootloader()?;
-    build_kernel()?;
+    build_hypervisor()?;
     Ok(())
 }
 
@@ -59,21 +59,21 @@ fn build_bootloader() -> Result<(), DynError> {
     Ok(())
 }
 
-fn build_kernel() -> Result<(), DynError> {
+fn build_hypervisor() -> Result<(), DynError> {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let status = Command::new(&cargo)
-        .current_dir(project_root().join("kernel"))
+        .current_dir(project_root().join("hypervisor"))
         .arg("build")
         .status()?;
     if !status.success() {
-        return Err("kernel build failed.".into());
+        return Err("hypervisor build failed.".into());
     }
 
-    let src = project_root().join("target/x86_64-unknown-none/debug/kernel");
-    let dst = project_root().join("esp/kernel.elf");
+    let src = project_root().join("target/x86_64-unknown-none/debug/hypervisor");
+    let dst = project_root().join("esp/hypervisor.elf");
     fs::copy(&src, &dst).map_err(|e| {
         format!(
-            "Failed to copy kernel from '{}' to '{}': {}",
+            "Failed to copy hypervisor from '{}' to '{}': {}",
             src.display(),
             dst.display(),
             e
@@ -89,9 +89,9 @@ fn run() -> Result<(), DynError> {
     let mut is_trace = false;
 
     let args: Vec<String> = env::args().collect();
-    let mut args_iter = args.iter().skip(2);
+    let args_iter = args.iter().skip(2);
 
-    while let Some(v) = args_iter.next() {
+    for v in args_iter {
         if v == "--debug" {
             is_debug = true;
         } else if v == "--trace" {
@@ -127,6 +127,7 @@ fn run() -> Result<(), DynError> {
         "format=raw,file=fat:rw:esp",
         "-net",
         "none",
+        "-nographic",
         "-serial",
         "mon:stdio",
         "-debugcon",

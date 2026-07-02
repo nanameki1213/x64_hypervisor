@@ -247,9 +247,9 @@ pub struct EfiMemoryDescriptor {
 
 #[repr(C)]
 pub enum EfiTimerDelay {
-    TimerCancel,
-    TimerPeriodic,
-    TimerRelative,
+    Cancel,
+    Periodic,
+    Relative,
 }
 
 pub type EfiEventNotify = unsafe extern "efiapi" fn(event: EfiEvent, context: *mut c_void);
@@ -337,10 +337,10 @@ pub struct EfiTimeCapabilities {
 
 #[repr(C)]
 pub enum EfiResetType {
-    ResetCold,
-    ResetWarm,
-    ResetShutdown,
-    ResetPlatformSpecific,
+    Cold,
+    Warm,
+    Shutdown,
+    PlatformSpecific,
 }
 
 #[repr(C)]
@@ -615,11 +615,11 @@ pub struct EfiBltPixel {
 
 #[repr(C)]
 pub enum EfiBltOperation {
-    EfiBltVideoFill,
-    EfiBltVideoToBltBuffer,
-    EfiBltBufferToVideo,
-    EfiBltVideoToVideo,
-    EfiGraphicsOutputBltOperationMax,
+    BltVideoFill,
+    BltVideoToBltBuffer,
+    BltBufferToVideo,
+    BltVideoToVideo,
+    GraphicsOutputBltOperationMax,
 }
 
 #[repr(C)]

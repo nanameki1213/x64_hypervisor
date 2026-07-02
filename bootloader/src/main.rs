@@ -34,9 +34,7 @@ pub struct MemoryMapSizeInfo {
 }
 
 pub fn efi_status_to_result(status: EfiStatus) -> Result<(), UefiError> {
-    if EfiStatus::is_error(status) {
-        Err(UefiError(status))
-    } else if EfiStatus::is_warning(status) {
+    if EfiStatus::is_error(status) || EfiStatus::is_warning(status) {
         Err(UefiError(status))
     } else {
         Ok(())
@@ -109,7 +107,7 @@ impl BootServices {
         Ok(())
     }
 
-    pub fn get_memory_map<'a>(&self) -> Result<MemoryMap, UefiError> {
+    pub fn get_memory_map(&self) -> Result<MemoryMap, UefiError> {
         let mut map_size = 0;
         let mut map_key = 0;
         let mut descriptor_size = 0;
@@ -147,7 +145,7 @@ impl BootServices {
         })
     }
 
-    pub fn get_memory_map_with_buf<'a>(&self, buffer: &'a [u8]) -> Result<MemoryMap, UefiError> {
+    pub fn get_memory_map_with_buf(&self, buffer: &[u8]) -> Result<MemoryMap, UefiError> {
         let mut map_size = buffer.len();
         let mut map_key = 0;
         let mut descriptor_size = 0;
@@ -245,11 +243,11 @@ impl BootServices {
 }
 
 fn boot_services() -> &'static EfiBootServices {
-    *BOOT_SERVICE.get().expect("Boot Services not initialized")
+    BOOT_SERVICE.get().expect("Boot Services not initialized")
 }
 
 fn con_out() -> &'static EfiSimpleTextOutputProtocol {
-    *CON_OUT.get().expect("ConOut not initialized")
+    CON_OUT.get().expect("ConOut not initialized")
 }
 
 fn uefi_putc(b: u8) {
@@ -263,6 +261,13 @@ fn uefi_putc(b: u8) {
     }
 }
 
+/// UEFIアプリケーションのエントリポイント
+///
+/// # Safety
+///
+/// この関数はUEFIファームウェアから直接呼び出されます。
+/// * `image_handle`: ファームウェアによって生成された有効なイメージハンドル
+/// * `system_table`: ファームウェアが提供する有効な`EfiSystemTable`を指す
 #[unsafe(no_mangle)]
 pub unsafe extern "efiapi" fn efi_main(
     image_handle: EfiHandle,
@@ -323,7 +328,7 @@ pub unsafe extern "efiapi" fn efi_main(
 
     let hypervisor_base_addr: EfiPhysicalAddress = match bs.allocate_any_pages(
         EfiMemoryType::LoaderData,
-        (hypervisor_file_size as usize + 0xfff) / 0x1000,
+        (hypervisor_file_size as usize).div_ceil(0x1000),
     ) {
         Ok(addr) => addr,
         Err(err) => panic!("failed to allocate memory for hypervisor: {:?}", err),
