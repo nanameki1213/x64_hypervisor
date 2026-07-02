@@ -7,9 +7,10 @@ mod elf;
 mod uefi;
 
 use console::print;
-use core::panic::PanicInfo;
 use core::arch::asm;
 use core::ffi::c_void;
+use core::panic::PanicInfo;
+use elf::*;
 use spin::Once;
 use uefi::*;
 
@@ -46,6 +47,7 @@ pub struct BootServices {
     bs: &'static EfiBootServices,
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 impl BootServices {
     pub const fn new(bs: &'static EfiBootServices) -> Self {
         Self { bs }
@@ -187,7 +189,51 @@ impl BootServices {
         Ok(())
     }
 
-     pub fn exit_boot_services(
+    pub fn locate_handle_buffer(
+        &self,
+        search_type: EfiLocateSearchType,
+        protocol: *const EfiGuid,
+        search_key: *mut c_void,
+        no_handles: *mut usize,
+    ) -> Result<*mut EfiHandle, UefiError> {
+        let mut buffer: *mut EfiHandle = core::ptr::null_mut();
+        let status = unsafe {
+            (self.bs.locate_handle_buffer)(
+                search_type,
+                protocol,
+                search_key,
+                no_handles,
+                &raw mut buffer,
+            )
+        };
+        efi_status_to_result(status)?;
+        Ok(buffer)
+    }
+
+    pub fn open_protocol(
+        &self,
+        image_handle: EfiHandle,
+        protocol: *const EfiGuid,
+        agent_handle: EfiHandle,
+        controller_handle: EfiHandle,
+        attributes: u32,
+    ) -> Result<*mut c_void, UefiError> {
+        let mut interface: *mut c_void = core::ptr::null_mut();
+        let status = unsafe {
+            (self.bs.open_protocol)(
+                image_handle,
+                protocol,
+                &raw mut interface,
+                agent_handle,
+                controller_handle,
+                attributes,
+            )
+        };
+        efi_status_to_result(status)?;
+        Ok(interface)
+    }
+
+    pub fn exit_boot_services(
         &self,
         image_handle: EfiHandle,
         map_key: usize,
@@ -206,8 +252,6 @@ fn con_out() -> &'static EfiSimpleTextOutputProtocol {
     *CON_OUT.get().expect("ConOut not initialized")
 }
 
-/// UEFI コンソール向け write_byte。
-/// `\n` を `\r\n` に変換し、1 バイトを UTF-16 に変換して output_string で出力する。
 fn uefi_putc(b: u8) {
     let out = con_out();
     if b == b'\n' {
@@ -234,11 +278,118 @@ pub unsafe extern "efiapi" fn efi_main(
     CON_OUT.call_once(|| con_out_proto);
     *console::CONSOLE.lock() = Some(console::Console::new(uefi_putc));
 
-    print!("Hello, World!\r\n");
+    let root_dir = match open_root_dir(&bs, image_handle) {
+        Ok(root) => root,
+        Err(err) => panic!("failed to open root directory: {:?}", err),
+    };
 
-    //halt_loop();
+    let mut hypervisor_file: *mut EfiFileProtocol = core::ptr::null_mut();
 
-    return EfiStatus::Success;
+    // "hypervisor.elf" を UTF-16 に変換（NUL 終端込みで 15 要素）
+    let mut hypervisor_name = [0u16; 15];
+    for (i, c) in "hypervisor.elf".encode_utf16().enumerate() {
+        hypervisor_name[i] = c;
+    }
+    let status = unsafe {
+        ((*root_dir).open)(
+            root_dir,
+            &raw mut hypervisor_file,
+            hypervisor_name.as_ptr(),
+            open_mode::READ,
+            0,
+        )
+    };
+    if EfiStatus::is_error(status) {
+        panic!("failed to open hypervisor: {:?}", status);
+    }
+
+    let mut file_info_size = core::mem::size_of::<EfiFileInfo>() + core::mem::size_of::<u16>() * 15;
+    let file_info_buffer_ptr = match bs.allocate_pool(EfiMemoryType::LoaderData, file_info_size) {
+        Ok(ptr) => ptr as *mut c_void,
+        Err(err) => panic!("failed to allocate memory: {:?}", err),
+    };
+    unsafe {
+        ((*hypervisor_file).get_info)(
+            hypervisor_file,
+            &raw const EFI_FILE_INFO_ID,
+            &raw mut file_info_size,
+            file_info_buffer_ptr,
+        );
+    }
+
+    let file_info = file_info_buffer_ptr as *mut EfiFileInfo;
+    let mut hypervisor_file_size = unsafe { (*file_info).file_size };
+    print!("file size: {:#X} byte\n", hypervisor_file_size);
+
+    let hypervisor_base_addr: EfiPhysicalAddress = match bs.allocate_any_pages(
+        EfiMemoryType::LoaderData,
+        (hypervisor_file_size as usize + 0xfff) / 0x1000,
+    ) {
+        Ok(addr) => addr,
+        Err(err) => panic!("failed to allocate memory for hypervisor: {:?}", err),
+    };
+
+    let status = unsafe {
+        ((*hypervisor_file).read)(
+            hypervisor_file,
+            &raw mut hypervisor_file_size as *mut usize,
+            hypervisor_base_addr as *mut c_void,
+        )
+    };
+    if EfiStatus::is_error(status) {
+        panic!("failed to read hypervisor file: {:?}", status);
+    }
+    print!(
+        "hypervisor: {:#x} ({} bytes)\r\n",
+        hypervisor_base_addr, hypervisor_file_size
+    );
+
+    let entry_address = load_elf(hypervisor_base_addr as *const u64);
+
+    let buffer = [0u8; 4096 * 4];
+    let memmap = match bs.get_memory_map_with_buf(&buffer) {
+        Ok(map) => map,
+        Err(err) => panic!("failed to get memory map: {:?}", err),
+    };
+    match bs.exit_boot_services(image_handle, memmap.map_key) {
+        Ok(_) => {}
+        Err(_) => halt_loop(),
+    };
+
+    let entry_point: unsafe extern "C" fn() =
+        unsafe { core::mem::transmute(entry_address as usize) };
+    unsafe {
+        entry_point();
+    }
+
+    EfiStatus::Success
+}
+
+fn open_root_dir(
+    bs: &BootServices,
+    image_handle: EfiHandle,
+) -> Result<*mut EfiFileProtocol, UefiError> {
+    let loaded_image = bs.open_protocol(
+        image_handle,
+        &raw const EFI_LOADED_IMAGE_PROTOCOL_GUID,
+        image_handle,
+        core::ptr::null_mut(),
+        open_protocol::BY_HANDLE_PROTOCOL,
+    )? as *mut EfiLoadedImageProtocol;
+    let fs = unsafe {
+        bs.open_protocol(
+            (*loaded_image).device_handle,
+            &raw const EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
+            image_handle,
+            core::ptr::null_mut(),
+            open_protocol::BY_HANDLE_PROTOCOL,
+        )? as *mut EfiSimpleFileSystemProtocol
+    };
+
+    let mut root: *mut EfiFileProtocol = core::ptr::null_mut();
+    let status = unsafe { ((*fs).open_volume)(fs, &raw mut root) };
+    efi_status_to_result(status)?;
+    Ok(root)
 }
 
 fn halt_loop() -> ! {

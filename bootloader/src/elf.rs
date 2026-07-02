@@ -37,6 +37,8 @@ pub fn load_elf<'a>(base_address: *const u64) -> u64 {
         let e_phnum = (*ehdr).e_phnum;
         let e_entry = (*ehdr).e_entry;
 
+        let mut physical_entry = 0;
+
         for i in 0..e_phnum {
             let phdr = (base_address as u64 + e_phoff + i as u64 * 56) as *const Elf64Phdr;
             if (*phdr).p_type != PT_LOAD {
@@ -52,8 +54,12 @@ pub fn load_elf<'a>(base_address: *const u64) -> u64 {
             let zero_start = (*phdr).p_paddr + (*phdr).p_filesz;
             let zero_size = (*phdr).p_memsz - (*phdr).p_filesz;
             core::ptr::write_bytes(zero_start as *mut u8, 0, zero_size as usize);
+
+            if e_entry >= (*phdr).p_vaddr && e_entry < (*phdr).p_vaddr + (*phdr).p_memsz {
+                physical_entry = (*phdr).p_paddr + (e_entry - (*phdr).p_vaddr);
+            }
         }
 
-        e_entry
+        physical_entry
     }
 }
