@@ -1,6 +1,12 @@
-[package]
-name = "x64_hypervisor"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "bootloader", "hypervisor", "support/console",
+    "xtask",
+]
+resolver = "2"
 
-[dependencies]
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
