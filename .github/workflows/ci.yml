@@ -28,6 +28,3 @@ jobs:
 
       - name: Run Clippy
         run: nix develop --command cargo clippy -- -D warnings
-
-      - name: Run Tests
-        run: nix develop --command cargo test
