@@ -17,6 +17,13 @@ SECTIONS
   .eh_frame_hdr : { *(.eh_frame_hdr) } > VIRT AT> PHYS
   .eh_frame     : { *(.eh_frame)     } > VIRT AT> PHYS
 
+  .rela.dyn : {
+    __rela_start = .;
+    *(.rela.dyn)
+    *(.rela.*)
+    __rela_end = .;
+  } > VIRT AT> PHYS
+
   .text : {
     *(.text)
     *(.text.*)
@@ -26,13 +33,22 @@ SECTIONS
     *(.rodata .rodata.*)
   } > VIRT AT> PHYS
 
+  .dynamic : {
+    *(.dynamic)
+  } > VIRT AT> PHYS
+
+  .got : {
+    *(.got)
+    *(.got.plt)
+  } > VIRT AT> PHYS
+
   .data : {
     *(.data .data.*)
-    *(.dynamic)
   } > VIRT AT> PHYS
 
   .bss : {
     *(.bss)
+    *(.bss.*)
     *(COMMON)
   } > VIRT AT> PHYS
 }

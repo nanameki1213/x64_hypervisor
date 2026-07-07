@@ -6,16 +6,24 @@ use crate::uefi::{EfiStatus, EfiSystemTable};
 mod elf;
 mod uefi;
 
-use console::print;
+use console::{print, println};
 use core::arch::asm;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 use elf::*;
 use spin::Once;
 use uefi::*;
+use acpi::*;
 
 pub static BOOT_SERVICE: Once<&'static EfiBootServices> = Once::new();
 pub static CON_OUT: Once<&'static EfiSimpleTextOutputProtocol> = Once::new();
+
+pub struct BootInfo {
+    pub acpi_rsdp_address: *const u8,
+    pub map_buffer: *const u8,
+    pub map_size: usize,
+    pub descriptor_size: usize,
+}
 
 pub struct MemoryMap {
     pub buffer: *mut u8,
@@ -93,7 +101,7 @@ impl BootServices {
         memory_type: EfiMemoryType,
         pages: usize,
         addr: EfiPhysicalAddress,
-    ) -> Result<(), UefiError> {
+    ) -> Result<EfiPhysicalAddress, UefiError> {
         let mut address = addr;
         let status = unsafe {
             (self.bs.allocate_pages)(
@@ -104,7 +112,7 @@ impl BootServices {
             )
         };
         efi_status_to_result(status)?;
-        Ok(())
+        Ok(address)
     }
 
     pub fn get_memory_map(&self) -> Result<MemoryMap, UefiError> {
@@ -349,22 +357,49 @@ pub unsafe extern "efiapi" fn efi_main(
         hypervisor_base_addr, hypervisor_file_size
     );
 
-    let entry_address = load_elf(hypervisor_base_addr as *const u64);
+    let entry_address = load_elf(hypervisor_base_addr as *const u64, &bs);
 
-    let buffer = [0u8; 4096 * 4];
-    let memmap = match bs.get_memory_map_with_buf(&buffer) {
+    let config_table = unsafe {
+        core::slice::from_raw_parts((*system_table).configuration_table, (*system_table).number_of_table_entries)
+    };
+
+    let mut rsdp_address = core::ptr::null();
+    for config in config_table {
+        if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
+            let rsdp = unsafe {
+                &*(config.vendor_table as *const RootSystemDescriptionPointer)
+            };
+            if !root_system_description_pointer_verification(config.vendor_table as *const RootSystemDescriptionPointer) {
+                panic!("RSDP is invalid!");
+            }
+            rsdp_address = (*rsdp).rsdt_address as *const u8;
+        }
+    }
+    println!("rsdp_address: {:#x}", rsdp_address as usize);
+
+    
+
+    let memmap = match bs.get_memory_map() {
         Ok(map) => map,
         Err(err) => panic!("failed to get memory map: {:?}", err),
     };
+
     match bs.exit_boot_services(image_handle, memmap.map_key) {
         Ok(_) => {}
         Err(_) => halt_loop(),
     };
 
-    let entry_point: unsafe extern "C" fn() =
+    let boot_info = BootInfo {
+        acpi_rsdp_address: rsdp_address,
+        map_buffer: memmap.buffer,
+        map_size: memmap.map_size,
+        descriptor_size: memmap.descriptor_size,
+    };
+
+    let entry_point: unsafe extern "C" fn(boot_info: &BootInfo) =
         unsafe { core::mem::transmute(entry_address as usize) };
     unsafe {
-        entry_point();
+        entry_point(&boot_info);
     }
 
     EfiStatus::Success
