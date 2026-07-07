@@ -3,9 +3,13 @@
 version = 4
 
 [[package]]
+name = "acpi"
+version = "0.1.0"
+[[package]]
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
+ "acpi",
  "console",
  "spin 0.12.0",
 ]
@@ -20,6 +24,7 @@ dependencies = [
 [[package]]
 name = "hypervisor"
 version = "0.1.0"
+ "acpi",
 
 [[package]]
 name = "lock_api"
