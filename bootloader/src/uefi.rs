@@ -90,6 +90,7 @@ pub type EfiVirtualAddress = u64;
 // EFI_GUID
 // ──────────────────────────────────────────────────────────────────────────────
 
+#[derive(PartialEq, Eq)]
 #[repr(C)]
 pub struct EfiGuid {
     pub data1: u32,
@@ -186,6 +187,16 @@ pub static EFI_SERIAL_IO_PROTOCOL_GUID: EfiGuid = EfiGuid {
     data4: [0x9a, 0x0c, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0xfd],
 };
 
+// ── RSDP ────────────────────────────────────────────────────────────────────
+
+/// EFI_ACPI_RSDP_STRUCTURE_GUID
+pub static EFI_ACPI_RSDP_STRUCTURE_GUID: EfiGuid = EfiGuid {
+    data1: 0x8868e871,
+    data2: 0xe4f1,
+    data3: 0x11d3,
+    data4: [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81],
+};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // EFI_TABLE_HEADER
 // ──────────────────────────────────────────────────────────────────────────────
@@ -232,6 +243,7 @@ pub enum EfiMemoryType {
 }
 
 /// EFI_MEMORY_DESCRIPTOR
+#[derive(Debug)]
 #[repr(C)]
 pub struct EfiMemoryDescriptor {
     pub memory_type: u32,
