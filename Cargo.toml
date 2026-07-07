@@ -1,7 +1,10 @@
 [workspace]
 members = [
-    "bootloader", "hypervisor", "support/console",
-    "xtask",
+    "bootloader",
+    "hypervisor",
+    "support/console",
+    "support/allocator",
+    "xtask", "support/acpi",
 ]
 resolver = "2"
 
