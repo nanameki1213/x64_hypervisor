@@ -63,6 +63,8 @@ pub fn root_system_description_pointer_verification(rsdp_ptr: *const RootSystemD
     return true;
 }
 
+#[repr(packed)]
+#[repr(C)]
 pub struct AcpiTableHeader {
     pub signature: [u8; 4],
     pub length: u32,
@@ -75,24 +77,70 @@ pub struct AcpiTableHeader {
     pub asl_compiler_revision: u32,
 }
 
-pub fn acpi_table_header_verification(header_ptr: *const AcpiTableHeader) -> bool {
-    let header = unsafe {
-        &*header_ptr
-    };
+pub trait AcpiTable {
+    const SIGNATURE: &'static str;
+    fn header(&self) -> &AcpiTableHeader;
+}
 
-    let is_correct_signature =
-        header.signature[0] == 'R' as u8 &&
-        header.signature[1] == 'S' as u8 &&
-        header.signature[2] == 'D' as u8 &&
-        header.signature[3] == 'T' as u8;
+#[repr(packed)]
+#[repr(C)]
+pub struct Xsdt {
+    pub header: AcpiTableHeader,
+    pub entry: *const u64,
+}
 
-    // ACPI Table Header is invalid.
-    if !is_correct_signature {
-        return false;
+impl AcpiTable for Xsdt {
+    const SIGNATURE: &'static str = "XSDT";
+    fn header(&self) -> &AcpiTableHeader {
+        &self.header
+    }
+}
+
+#[repr(packed)]
+#[repr(C)]
+pub struct Fadt {
+    pub header: AcpiTableHeader,
+    pub firmware_ctrl: u32,
+    pub dsdt: u32,
+    // ignore under this field
+}
+
+impl AcpiTable for Fadt {
+    const SIGNATURE: &'static str = "FADT";
+    fn header(&self) -> &AcpiTableHeader {
+        &self.header
+    }
+}
+
+#[repr(packed)]
+#[repr(C)]
+pub struct Dsdt {
+    pub header: AcpiTableHeader,
+}
+
+impl AcpiTable for Dsdt {
+    const SIGNATURE: &'static str = "DSDT";
+    fn header(&self) -> &AcpiTableHeader {
+        &self.header
+    }
+}
+
+pub fn is_valid_signature<T: AcpiTable>(table: &T) -> bool {
+    let header = table.header();
+
+    let signature = T::SIGNATURE.as_bytes();
+    if header.signature == signature {
+        return true;
     }
 
+    return false;
+}
+
+pub fn calclate_checksum<T: AcpiTable>(table: &T) -> bool {
+    let header = table.header();
+
     let header_bytes = unsafe {
-        &*core::slice::from_raw_parts(header_ptr as *const u8, header.length as usize)
+        &*core::slice::from_raw_parts(&raw const header as *const u8, header.length as usize)
     };
 
     let mut sum = 0;

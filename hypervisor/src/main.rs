@@ -2,6 +2,8 @@
 #![no_main]
 
 use core::alloc::{GlobalAlloc, Layout};
+use console::println;
+use serial::putc;
 use core::arch::asm;
 use core::panic::PanicInfo;
 use core::ptr::NonNull;
@@ -10,7 +12,7 @@ use acpi::*;
 use spin::Mutex;
 
 pub struct BootInfo {
-    pub acpi_rsdp_address: *const u8,
+    pub acpi_xsdt_address: *const u8,
     pub map_buffer: *const u8,
     pub map_size: usize,
     pub descriptor_size: usize,
@@ -104,13 +106,28 @@ extern "win64" fn main(boot_info: &BootInfo) {
         i += 1;
     }
 
-    if !acpi_table_header_verification(boot_info.acpi_rsdp_address as *const AcpiTableHeader) {
+    *console::CONSOLE.lock() = Some(console::Console::new(putc));
+    println!("hello world from hypervisor.");
+        
+    let xsdt = unsafe {
+        &*(boot_info.acpi_xsdt_address as *const Xsdt)
+    };
+    if !is_valid_signature(xsdt) {
+        halt_loop();
+    }
+    if !calclate_checksum(xsdt) {
         halt_loop();
     }
 
-    let acpi_table_header = unsafe {
-        &*(boot_info.acpi_rsdp_address as *const AcpiTableHeader)
+    let entry_num = (xsdt.header.length as usize - core::mem::size_of::<AcpiTableHeader>()) / core::mem::size_of::<*const u64>();
+    let entries = unsafe {
+        &*core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num)
     };
+
+    for entry in entries {
+        if entry.signature == "FADT".as_bytes() {
+        }
+    }
 
     halt_loop();
 }

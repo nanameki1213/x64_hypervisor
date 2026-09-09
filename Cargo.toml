@@ -4,6 +4,7 @@ members = [
     "hypervisor",
     "support/console",
     "support/allocator",
+    "support/serial",
     "xtask", "support/acpi",
 ]
 resolver = "2"

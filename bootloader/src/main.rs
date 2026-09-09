@@ -19,7 +19,7 @@ pub static BOOT_SERVICE: Once<&'static EfiBootServices> = Once::new();
 pub static CON_OUT: Once<&'static EfiSimpleTextOutputProtocol> = Once::new();
 
 pub struct BootInfo {
-    pub acpi_rsdp_address: *const u8,
+    pub acpi_xsdt_address: *const u8,
     pub map_buffer: *const u8,
     pub map_size: usize,
     pub descriptor_size: usize,
@@ -363,7 +363,7 @@ pub unsafe extern "efiapi" fn efi_main(
         core::slice::from_raw_parts((*system_table).configuration_table, (*system_table).number_of_table_entries)
     };
 
-    let mut rsdp_address = core::ptr::null();
+    let mut xsdt_address = core::ptr::null();
     for config in config_table {
         if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
             let rsdp = unsafe {
@@ -372,12 +372,10 @@ pub unsafe extern "efiapi" fn efi_main(
             if !root_system_description_pointer_verification(config.vendor_table as *const RootSystemDescriptionPointer) {
                 panic!("RSDP is invalid!");
             }
-            rsdp_address = (*rsdp).rsdt_address as *const u8;
+            xsdt_address = (*rsdp).xsdt_address as *const u8;
         }
     }
-    println!("rsdp_address: {:#x}", rsdp_address as usize);
-
-    
+    println!("rsdp_address: {:#x}", xsdt_address as usize);
 
     let memmap = match bs.get_memory_map() {
         Ok(map) => map,
@@ -390,7 +388,7 @@ pub unsafe extern "efiapi" fn efi_main(
     };
 
     let boot_info = BootInfo {
-        acpi_rsdp_address: rsdp_address,
+        acpi_xsdt_address: xsdt_address,
         map_buffer: memmap.buffer,
         map_size: memmap.map_size,
         descriptor_size: memmap.descriptor_size,
