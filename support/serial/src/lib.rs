@@ -31,6 +31,7 @@ pub fn is_uart_available() -> bool {
     }
 }
 
+#[inline(always)]
 pub fn putc(c: u8) {
     outb(0x3f8, c);
 }
