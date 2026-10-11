@@ -5,6 +5,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use console::println;
 use serial::putc;
 use core::arch::asm;
+use core::arch::global_asm;
 use core::panic::PanicInfo;
 use core::ptr::NonNull;
 use acpi::*;
@@ -47,6 +48,11 @@ pub enum EfiMemoryType {
     PersistentMemory,
     MaxMemoryType,
 }
+
+global_asm!(
+    include_str!("boot.S"),
+    options(att_syntax)
+);
 
 static MEMORY_ALLOCATOR: Mutex<allocator::Heap<33>> = Mutex::new(allocator::Heap::new());
 
