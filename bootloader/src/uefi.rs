@@ -214,6 +214,9 @@ pub struct EfiTableHeader {
 // Memory types
 // ──────────────────────────────────────────────────────────────────────────────
 
+pub const EFI_ALLOC_ALIGN: usize = 4096;
+pub const EFI_PAGE_SIZE: usize = 4096;
+
 #[repr(C)]
 pub enum EfiAllocateType {
     AllocateAnyPages,

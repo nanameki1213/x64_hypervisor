@@ -1,6 +1,6 @@
 use console::println;
 
-use crate::{BootServices, uefi};
+use crate::{BootServices, KERNEL_ALIGN, allocate_pages_aligned, uefi};
 
 #[repr(C)]
 pub struct Elf64Ehdr {
@@ -59,16 +59,17 @@ pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
             }
         }
 
-        let load_address = match bs.allocate_pages_at(
+        let load_address = match allocate_pages_aligned(
+            bs,
             uefi::EfiMemoryType::LoaderCode,
             total_size.div_ceil(0x1000),
-            min_lma,
+            KERNEL_ALIGN,
         ) {
             Ok(addr) => addr,
             Err(err) => panic!("failed to allocate memory: {:?}", err),
         };
 
-        println!("load_address: {:#x}", load_address);
+        println!("addr: {:#x}", load_address as usize);
 
         for i in 0..e_phnum {
             let phdr = (base_address as u64 + e_phoff + i as u64 * 56) as *const Elf64Phdr;
@@ -77,6 +78,7 @@ pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
             }
 
             let physical_address = load_address + ((*phdr).p_paddr - min_lma);
+            println!("physical_address: {:#x}", physical_address as usize);
 
             core::ptr::copy(
                 (base_address as u64 + (*phdr).p_offset) as *const u8,
