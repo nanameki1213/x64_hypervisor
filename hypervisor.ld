@@ -1,54 +1,55 @@
 OUTPUT_FORMAT(elf64-x86-64)
 OUTPUT_ARCH(i386:x86-64)
-ENTRY(main)
+ENTRY(_start)
 
-MEMORY
-{
-  VIRT (rxw) : ORIGIN = 0xFFFFFFFF80000000, LENGTH = 0x40000000
-  PHYS (rxw) : ORIGIN = 0x00100000,         LENGTH = 0x40000000
-}
+KERNEL_OFFSET = 0xffffffff80000000;
+KERNEL_PHYS   = 0x1000000;
 
 SECTIONS
 {
-  .hash         : { *(.hash)         } > VIRT AT> PHYS
-  .gnu.hash     : { *(.gnu.hash)     } > VIRT AT> PHYS
-  .dynsym       : { *(.dynsym)       } > VIRT AT> PHYS
-  .dynstr       : { *(.dynstr)       } > VIRT AT> PHYS
-  .eh_frame_hdr : { *(.eh_frame_hdr) } > VIRT AT> PHYS
-  .eh_frame     : { *(.eh_frame)     } > VIRT AT> PHYS
+  . = KERNEL_OFFSET + KERNEL_PHYS;
 
-  .rela.dyn : {
+  .text : AT(ADDR(.text) - KERNEL_OFFSET) {
+    *(.text.boot) 
+    *(.text .text.*)
+  }
+
+  .rodata : AT(ADDR(.rodata) - KERNEL_OFFSET) {
+    *(.rodata .rodata.*)
+  }
+
+  .eh_frame_hdr : AT(ADDR(.eh_frame_hdr) - KERNEL_OFFSET) { *(.eh_frame_hdr) }
+  .eh_frame     : AT(ADDR(.eh_frame)     - KERNEL_OFFSET) { *(.eh_frame) }
+
+  .hash     : AT(ADDR(.hash)     - KERNEL_OFFSET) { *(.hash) }
+  .gnu.hash : AT(ADDR(.gnu.hash) - KERNEL_OFFSET) { *(.gnu.hash) }
+  .dynsym   : AT(ADDR(.dynsym)   - KERNEL_OFFSET) { *(.dynsym) }
+  .dynstr   : AT(ADDR(.dynstr)   - KERNEL_OFFSET) { *(.dynstr) }
+
+  .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_OFFSET) {
     __rela_start = .;
     *(.rela.dyn)
     *(.rela.*)
     __rela_end = .;
-  } > VIRT AT> PHYS
+  }
 
-  .text : {
-    *(.text)
-    *(.text.*)
-  } > VIRT AT> PHYS
+  . = ALIGN(4096);
 
-  .rodata : {
-    *(.rodata .rodata.*)
-  } > VIRT AT> PHYS
+  .dynamic : AT(ADDR(.dynamic) - KERNEL_OFFSET) { *(.dynamic) }
 
-  .dynamic : {
-    *(.dynamic)
-  } > VIRT AT> PHYS
-
-  .got : {
-    *(.got)
-    *(.got.plt)
-  } > VIRT AT> PHYS
-
-  .data : {
+  .data : AT(ADDR(.data) - KERNEL_OFFSET) {
+    *(.data.rel.ro .data.rel.ro.*)
     *(.data .data.*)
-  } > VIRT AT> PHYS
+  }
 
-  .bss : {
-    *(.bss)
-    *(.bss.*)
+  .bss : AT(ADDR(.bss) - KERNEL_OFFSET) {
+    *(.bss .bss.*)
     *(COMMON)
-  } > VIRT AT> PHYS
+  }
+
+  /DISCARD/ : {
+    *(.interp)
+    *(.note .note.*)
+    *(.comment)
+  }
 }
