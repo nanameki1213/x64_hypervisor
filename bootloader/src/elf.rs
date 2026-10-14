@@ -43,21 +43,23 @@ pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
 
         let mut physical_entry = 0;
 
-        let mut total_size = 0;
-        let mut flag = false;
-        let mut min_lma = 0;
+        // セグメント間にはアラインメント由来の隙間があるので、
+        // p_memsz の合計ではなく LOAD セグメント全体の範囲を確保する
+        let mut min_lma = u64::MAX;
+        let mut max_lma = 0;
         for i in 0..e_phnum {
             let phdr = (base_address as u64 + e_phoff + i as u64 * 56) as *const Elf64Phdr;
             if (*phdr).p_type != PT_LOAD {
                 continue;
             }
 
-            total_size += (*phdr).p_memsz as usize;
-            if !flag {
-                min_lma = (*phdr).p_paddr;
-                flag = true;
-            }
+            min_lma = min_lma.min((*phdr).p_paddr);
+            max_lma = max_lma.max((*phdr).p_paddr + (*phdr).p_memsz);
         }
+        if min_lma > max_lma {
+            panic!("no PT_LOAD segment found");
+        }
+        let total_size = (max_lma - min_lma) as usize;
 
         let load_address = match allocate_pages_aligned(
             bs,
