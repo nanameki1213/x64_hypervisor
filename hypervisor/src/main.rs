@@ -87,6 +87,9 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
 #[unsafe(no_mangle)]
 extern "win64" fn main(boot_info: &BootInfo) {
+    *console::CONSOLE.lock() = Some(console::Console::new(putc));
+    println!("hello world from hypervisor.");
+     
     let mut i = 0;
     loop {
         let desc_ptr = (boot_info.map_buffer as usize + i * boot_info.descriptor_size) as *mut EfiMemoryDescriptor;
@@ -111,10 +114,7 @@ extern "win64" fn main(boot_info: &BootInfo) {
         }
         i += 1;
     }
-
-    *console::CONSOLE.lock() = Some(console::Console::new(putc));
-    println!("hello world from hypervisor.");
-        
+   
     let xsdt = unsafe {
         &*(boot_info.acpi_xsdt_address as *const Xsdt)
     };

@@ -80,7 +80,6 @@ pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
             }
 
             let physical_address = load_address + ((*phdr).p_paddr - min_lma);
-            println!("physical_address: {:#x}", physical_address as usize);
 
             core::ptr::copy(
                 (base_address as u64 + (*phdr).p_offset) as *const u8,
