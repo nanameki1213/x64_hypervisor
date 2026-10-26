@@ -6,6 +6,7 @@ use crate::uefi::{EfiStatus, EfiSystemTable};
 mod elf;
 mod uefi;
 
+use acpi::*;
 use console::print;
 use core::arch::asm;
 use core::ffi::c_void;
@@ -14,8 +15,17 @@ use elf::*;
 use spin::Once;
 use uefi::*;
 
+pub const KERNEL_ALIGN: usize = 0x200000;
+
 pub static BOOT_SERVICE: Once<&'static EfiBootServices> = Once::new();
 pub static CON_OUT: Once<&'static EfiSimpleTextOutputProtocol> = Once::new();
+
+pub struct BootInfo {
+    pub acpi_xsdt_address: *const u8,
+    pub map_buffer: *const u8,
+    pub map_size: usize,
+    pub descriptor_size: usize,
+}
 
 pub struct MemoryMap {
     pub buffer: *mut u8,
@@ -93,7 +103,7 @@ impl BootServices {
         memory_type: EfiMemoryType,
         pages: usize,
         addr: EfiPhysicalAddress,
-    ) -> Result<(), UefiError> {
+    ) -> Result<EfiPhysicalAddress, UefiError> {
         let mut address = addr;
         let status = unsafe {
             (self.bs.allocate_pages)(
@@ -103,6 +113,12 @@ impl BootServices {
                 &mut address,
             )
         };
+        efi_status_to_result(status)?;
+        Ok(address)
+    }
+
+    pub fn free_pages(&self, memory: EfiPhysicalAddress, pages: usize) -> Result<(), UefiError> {
+        let status = unsafe { (self.bs.free_pages)(memory, pages) };
         efi_status_to_result(status)?;
         Ok(())
     }
@@ -281,7 +297,9 @@ pub unsafe extern "efiapi" fn efi_main(
 
     let con_out_proto = unsafe { &*table.con_out };
     CON_OUT.call_once(|| con_out_proto);
-    *console::CONSOLE.lock() = Some(console::Console::new(uefi_putc));
+    {
+        *console::CONSOLE.lock() = Some(console::Console::new(uefi_putc));
+    }
 
     let root_dir = match open_root_dir(&bs, image_handle) {
         Ok(root) => root,
@@ -324,7 +342,6 @@ pub unsafe extern "efiapi" fn efi_main(
 
     let file_info = file_info_buffer_ptr as *mut EfiFileInfo;
     let mut hypervisor_file_size = unsafe { (*file_info).file_size };
-    print!("file size: {:#X} byte\n", hypervisor_file_size);
 
     let hypervisor_base_addr: EfiPhysicalAddress = match bs.allocate_any_pages(
         EfiMemoryType::LoaderData,
@@ -344,27 +361,52 @@ pub unsafe extern "efiapi" fn efi_main(
     if EfiStatus::is_error(status) {
         panic!("failed to read hypervisor file: {:?}", status);
     }
-    print!(
-        "hypervisor: {:#x} ({} bytes)\r\n",
-        hypervisor_base_addr, hypervisor_file_size
-    );
 
-    let entry_address = load_elf(hypervisor_base_addr as *const u64);
+    let entry_address = load_elf(hypervisor_base_addr as *const u64, &bs);
 
-    let buffer = [0u8; 4096 * 4];
-    let memmap = match bs.get_memory_map_with_buf(&buffer) {
+    let config_table = unsafe {
+        core::slice::from_raw_parts(
+            (*system_table).configuration_table,
+            (*system_table).number_of_table_entries,
+        )
+    };
+
+    let mut xsdt_address = core::ptr::null();
+    for config in config_table {
+        if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
+            let rsdp = unsafe { &*(config.vendor_table as *const RootSystemDescriptionPointer) };
+            if !unsafe {
+                root_system_description_pointer_verification(
+                    config.vendor_table as *const RootSystemDescriptionPointer,
+                )
+            } {
+                panic!("RSDP is invalid!");
+            }
+            xsdt_address = rsdp.xsdt_address as *const u8;
+        }
+    }
+
+    let memmap = match bs.get_memory_map() {
         Ok(map) => map,
         Err(err) => panic!("failed to get memory map: {:?}", err),
     };
+
     match bs.exit_boot_services(image_handle, memmap.map_key) {
         Ok(_) => {}
         Err(_) => halt_loop(),
     };
 
-    let entry_point: unsafe extern "C" fn() =
+    let boot_info = BootInfo {
+        acpi_xsdt_address: xsdt_address,
+        map_buffer: memmap.buffer,
+        map_size: memmap.map_size,
+        descriptor_size: memmap.descriptor_size,
+    };
+
+    let entry_point: unsafe extern "C" fn(boot_info: &BootInfo) =
         unsafe { core::mem::transmute(entry_address as usize) };
     unsafe {
-        entry_point();
+        entry_point(&boot_info);
     }
 
     EfiStatus::Success
@@ -395,6 +437,32 @@ fn open_root_dir(
     let status = unsafe { ((*fs).open_volume)(fs, &raw mut root) };
     efi_status_to_result(status)?;
     Ok(root)
+}
+
+fn allocate_pages_aligned(
+    bs: &BootServices,
+    memory_type: EfiMemoryType,
+    pages: usize,
+    mut align: usize,
+) -> Result<EfiPhysicalAddress, UefiError> {
+    if align < EFI_ALLOC_ALIGN {
+        align = EFI_ALLOC_ALIGN;
+    }
+
+    let slack = align / EFI_PAGE_SIZE - 1;
+
+    let addr = bs.allocate_any_pages(memory_type, pages + slack)?;
+
+    let aligned = (addr as usize + align - 1) & !(align - 1);
+    if slack > 0 {
+        let head = (aligned - addr as usize) / EFI_PAGE_SIZE;
+        let tail = slack - head;
+        if head > 0 {
+            bs.free_pages(addr, head)?;
+            bs.free_pages((aligned + (pages * EFI_PAGE_SIZE)) as u64, tail)?;
+        }
+    }
+    Ok(aligned as u64)
 }
 
 fn halt_loop() -> ! {

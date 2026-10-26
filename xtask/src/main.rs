@@ -87,6 +87,7 @@ fn build_hypervisor() -> Result<(), DynError> {
 fn run() -> Result<(), DynError> {
     let mut is_debug = false;
     let mut is_trace = false;
+    let mut is_novnc = false;
 
     let args: Vec<String> = env::args().collect();
     let args_iter = args.iter().skip(2);
@@ -96,6 +97,8 @@ fn run() -> Result<(), DynError> {
             is_debug = true;
         } else if v == "--trace" {
             is_trace = true;
+        } else if v == "--novnc" {
+            is_novnc = true;
         }
     }
 
@@ -114,7 +117,11 @@ fn run() -> Result<(), DynError> {
     })?;
 
     let mut qemu_command = Command::new("qemu-system-x86_64");
+
     qemu_command.current_dir(project_root());
+    if is_novnc {
+        qemu_command.args(["-vnc", "localhost:0"]);
+    }
     qemu_command.args([
         "-drive",
         &format!(

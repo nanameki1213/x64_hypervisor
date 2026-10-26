@@ -1,3 +1,7 @@
+use console::println;
+
+use crate::{BootServices, KERNEL_ALIGN, allocate_pages_aligned, uefi};
+
 #[repr(C)]
 pub struct Elf64Ehdr {
     pub e_ident: [u8; 16],
@@ -30,7 +34,7 @@ pub struct Elf64Phdr {
 
 pub const PT_LOAD: u32 = 1;
 
-pub fn load_elf(base_address: *const u64) -> u64 {
+pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
     unsafe {
         let ehdr = base_address as *const Elf64Ehdr;
         let e_phoff = (*ehdr).e_phoff;
@@ -39,24 +43,56 @@ pub fn load_elf(base_address: *const u64) -> u64 {
 
         let mut physical_entry = 0;
 
+        // セグメント間にはアラインメント由来の隙間があるので、
+        // p_memsz の合計ではなく LOAD セグメント全体の範囲を確保する
+        let mut min_lma = u64::MAX;
+        let mut max_lma = 0;
         for i in 0..e_phnum {
             let phdr = (base_address as u64 + e_phoff + i as u64 * 56) as *const Elf64Phdr;
             if (*phdr).p_type != PT_LOAD {
                 continue;
             }
 
+            min_lma = min_lma.min((*phdr).p_paddr);
+            max_lma = max_lma.max((*phdr).p_paddr + (*phdr).p_memsz);
+        }
+        if min_lma > max_lma {
+            panic!("no PT_LOAD segment found");
+        }
+        let total_size = (max_lma - min_lma) as usize;
+
+        let load_address = match allocate_pages_aligned(
+            bs,
+            uefi::EfiMemoryType::LoaderCode,
+            total_size.div_ceil(0x1000),
+            KERNEL_ALIGN,
+        ) {
+            Ok(addr) => addr,
+            Err(err) => panic!("failed to allocate memory: {:?}", err),
+        };
+
+        println!("addr: {:#x}", load_address as usize);
+
+        for i in 0..e_phnum {
+            let phdr = (base_address as u64 + e_phoff + i as u64 * 56) as *const Elf64Phdr;
+            if (*phdr).p_type != PT_LOAD {
+                continue;
+            }
+
+            let physical_address = load_address + ((*phdr).p_paddr - min_lma);
+
             core::ptr::copy(
                 (base_address as u64 + (*phdr).p_offset) as *const u8,
-                (*phdr).p_paddr as *mut u8,
+                physical_address as *mut u8,
                 (*phdr).p_filesz as usize,
             );
 
-            let zero_start = (*phdr).p_paddr + (*phdr).p_filesz;
+            let zero_start = physical_address + (*phdr).p_filesz;
             let zero_size = (*phdr).p_memsz - (*phdr).p_filesz;
             core::ptr::write_bytes(zero_start as *mut u8, 0, zero_size as usize);
 
             if e_entry >= (*phdr).p_vaddr && e_entry < (*phdr).p_vaddr + (*phdr).p_memsz {
-                physical_entry = (*phdr).p_paddr + (e_entry - (*phdr).p_vaddr);
+                physical_entry = physical_address + (e_entry - (*phdr).p_vaddr);
             }
         }
 
