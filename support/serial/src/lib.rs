@@ -18,17 +18,12 @@ pub fn inb(port: u16) -> u8 {
     unsafe {
         asm!("in al, dx", in("dx") port, out("al") ret, options(nomem, nostack, preserves_flags));
     }
-    return ret;
+    ret
 }
 
 pub fn is_uart_available() -> bool {
     outb(0x3ff, 0xff);
-    let val = inb(0x3ff);
-    if val == 0xff {
-        return true;
-    } else {
-        return false;
-    }
+    inb(0x3ff) == 0xff
 }
 
 #[inline(always)]

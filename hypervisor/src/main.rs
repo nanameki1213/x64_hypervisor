@@ -125,7 +125,7 @@ extern "win64" fn main(boot_info: &BootInfo) {
     let entry_num = (xsdt.header.length as usize - core::mem::size_of::<AcpiTableHeader>())
         / core::mem::size_of::<*const u64>();
     let entries =
-        unsafe { &*core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num) };
+        unsafe { core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num) };
 
     for entry in entries {
         if entry.signature == "FADT".as_bytes() {}

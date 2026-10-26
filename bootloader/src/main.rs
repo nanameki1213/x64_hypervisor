@@ -7,7 +7,7 @@ mod elf;
 mod uefi;
 
 use acpi::*;
-use console::{print, println};
+use console::print;
 use core::arch::asm;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
@@ -375,12 +375,14 @@ pub unsafe extern "efiapi" fn efi_main(
     for config in config_table {
         if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
             let rsdp = unsafe { &*(config.vendor_table as *const RootSystemDescriptionPointer) };
-            if !root_system_description_pointer_verification(
-                config.vendor_table as *const RootSystemDescriptionPointer,
-            ) {
+            if !unsafe {
+                root_system_description_pointer_verification(
+                    config.vendor_table as *const RootSystemDescriptionPointer,
+                )
+            } {
                 panic!("RSDP is invalid!");
             }
-            xsdt_address = (*rsdp).xsdt_address as *const u8;
+            xsdt_address = rsdp.xsdt_address as *const u8;
         }
     }
 

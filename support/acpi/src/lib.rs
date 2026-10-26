@@ -15,19 +15,22 @@ pub struct RootSystemDescriptionPointer {
     pub reserved: [u8; 3],
 }
 
-pub fn root_system_description_pointer_verification(
+/// # Safety
+///
+/// `rsdp_ptr` must point to a valid, readable RSDP structure.
+pub unsafe fn root_system_description_pointer_verification(
     rsdp_ptr: *const RootSystemDescriptionPointer,
 ) -> bool {
     let rsdp = unsafe { &*rsdp_ptr };
 
-    let is_correct_signature = rsdp.signature[0] == 'R' as u8
-        && rsdp.signature[1] == 'S' as u8
-        && rsdp.signature[2] == 'D' as u8
-        && rsdp.signature[3] == ' ' as u8
-        && rsdp.signature[4] == 'P' as u8
-        && rsdp.signature[5] == 'T' as u8
-        && rsdp.signature[6] == 'R' as u8
-        && rsdp.signature[7] == ' ' as u8;
+    let is_correct_signature = rsdp.signature[0] == b'R'
+        && rsdp.signature[1] == b'S'
+        && rsdp.signature[2] == b'D'
+        && rsdp.signature[3] == b' '
+        && rsdp.signature[4] == b'P'
+        && rsdp.signature[5] == b'T'
+        && rsdp.signature[6] == b'R'
+        && rsdp.signature[7] == b' ';
     if !is_correct_signature {
         return false;
     }
@@ -58,7 +61,7 @@ pub fn root_system_description_pointer_verification(
         }
     }
 
-    return true;
+    true
 }
 
 #[repr(packed)]
@@ -131,14 +134,14 @@ pub fn is_valid_signature<T: AcpiTable>(table: &T) -> bool {
         return true;
     }
 
-    return false;
+    false
 }
 
 pub fn calclate_checksum<T: AcpiTable>(table: &T) -> bool {
     let header = table.header();
 
     let header_bytes = unsafe {
-        &*core::slice::from_raw_parts(&raw const header as *const u8, header.length as usize)
+        core::slice::from_raw_parts(&raw const header as *const u8, header.length as usize)
     };
 
     let mut sum = 0;
@@ -150,5 +153,5 @@ pub fn calclate_checksum<T: AcpiTable>(table: &T) -> bool {
         return false;
     }
 
-    return true;
+    true
 }

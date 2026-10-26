@@ -6,6 +6,9 @@ use core::alloc::Layout;
 use core::cmp::{max, min};
 use core::ptr::NonNull;
 
+#[derive(Debug)]
+pub struct AllocError;
+
 fn align_up(address: usize, align: usize) -> usize {
     (address + align - 1) & !(align - 1)
 }
@@ -59,7 +62,7 @@ impl<const ORDER: usize> Heap<ORDER> {
     }
 
     // TODO: error handling
-    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
+    pub fn allocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         // アロケート単位は最低でもusize
         let size = max(
             layout.size().next_power_of_two(),
@@ -74,7 +77,7 @@ impl<const ORDER: usize> Heap<ORDER> {
                         self.free_list[j - 1].push((block as usize + (1 << (j - 1))) as *mut usize);
                         self.free_list[j - 1].push(block);
                     } else {
-                        return Err(());
+                        return Err(AllocError);
                     }
                 }
                 let result =
@@ -82,14 +85,14 @@ impl<const ORDER: usize> Heap<ORDER> {
                 if let Some(result) = result {
                     return Ok(result);
                 } else {
-                    return Err(());
+                    return Err(AllocError);
                 }
             }
         }
-        Err(())
+        Err(AllocError)
     }
 
-    pub fn callocate(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
+    pub fn callocate(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
         let size = max(
             layout.size().next_power_of_two(),
             max(layout.align(), size_of::<usize>()),
