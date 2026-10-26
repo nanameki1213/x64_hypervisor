@@ -1,14 +1,14 @@
 #![no_std]
 #![no_main]
 
-use core::alloc::{GlobalAlloc, Layout};
+use acpi::*;
 use console::println;
-use serial::putc;
+use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 use core::ptr::NonNull;
-use acpi::*;
+use serial::putc;
 
 use spin::Mutex;
 
@@ -49,10 +49,7 @@ pub enum EfiMemoryType {
     MaxMemoryType,
 }
 
-global_asm!(
-    include_str!("boot.S"),
-    options(att_syntax)
-);
+global_asm!(include_str!("boot.S"), options(att_syntax));
 
 static MEMORY_ALLOCATOR: Mutex<allocator::Heap<33>> = Mutex::new(allocator::Heap::new());
 
@@ -89,35 +86,35 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 extern "win64" fn main(boot_info: &BootInfo) {
     *console::CONSOLE.lock() = Some(console::Console::new(putc));
     println!("hello world from hypervisor.");
-     
+
     let mut i = 0;
     loop {
-        let desc_ptr = (boot_info.map_buffer as usize + i * boot_info.descriptor_size) as *mut EfiMemoryDescriptor;
+        let desc_ptr = (boot_info.map_buffer as usize + i * boot_info.descriptor_size)
+            as *mut EfiMemoryDescriptor;
         if desc_ptr as usize > boot_info.map_buffer as usize + boot_info.map_size {
             break;
         }
         unsafe {
-            let desc =  &*desc_ptr;
-            if desc.memory_type == EfiMemoryType::ConventionalMemory as u32 ||
-                desc.memory_type == EfiMemoryType::BootServicesCode as u32 ||
-                desc.memory_type == EfiMemoryType::BootServicesData as u32
+            let desc = &*desc_ptr;
+            if desc.memory_type == EfiMemoryType::ConventionalMemory as u32
+                || desc.memory_type == EfiMemoryType::BootServicesCode as u32
+                || desc.memory_type == EfiMemoryType::BootServicesData as u32
             {
                 // 0番地からスタートするエントリはスキップ
                 if desc.physical_start == 0 {
                     continue;
                 }
 
-                MEMORY_ALLOCATOR
-                    .lock()
-                    .add_to_heap(desc.physical_start as usize, desc.number_of_pages as usize * 4096);
+                MEMORY_ALLOCATOR.lock().add_to_heap(
+                    desc.physical_start as usize,
+                    desc.number_of_pages as usize * 4096,
+                );
             }
         }
         i += 1;
     }
-   
-    let xsdt = unsafe {
-        &*(boot_info.acpi_xsdt_address as *const Xsdt)
-    };
+
+    let xsdt = unsafe { &*(boot_info.acpi_xsdt_address as *const Xsdt) };
     if !is_valid_signature(xsdt) {
         halt_loop();
     }
@@ -125,14 +122,13 @@ extern "win64" fn main(boot_info: &BootInfo) {
         halt_loop();
     }
 
-    let entry_num = (xsdt.header.length as usize - core::mem::size_of::<AcpiTableHeader>()) / core::mem::size_of::<*const u64>();
-    let entries = unsafe {
-        &*core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num)
-    };
+    let entry_num = (xsdt.header.length as usize - core::mem::size_of::<AcpiTableHeader>())
+        / core::mem::size_of::<*const u64>();
+    let entries =
+        unsafe { &*core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num) };
 
     for entry in entries {
-        if entry.signature == "FADT".as_bytes() {
-        }
+        if entry.signature == "FADT".as_bytes() {}
     }
 
     halt_loop();

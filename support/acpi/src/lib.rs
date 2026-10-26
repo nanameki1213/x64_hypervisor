@@ -15,20 +15,19 @@ pub struct RootSystemDescriptionPointer {
     pub reserved: [u8; 3],
 }
 
-pub fn root_system_description_pointer_verification(rsdp_ptr: *const RootSystemDescriptionPointer) -> bool {
-    let rsdp = unsafe {
-        &*rsdp_ptr
-    };
+pub fn root_system_description_pointer_verification(
+    rsdp_ptr: *const RootSystemDescriptionPointer,
+) -> bool {
+    let rsdp = unsafe { &*rsdp_ptr };
 
-    let is_correct_signature =
-        rsdp.signature[0] == 'R' as u8 &&
-        rsdp.signature[1] == 'S' as u8 &&
-        rsdp.signature[2] == 'D' as u8 &&
-        rsdp.signature[3] == ' ' as u8 &&
-        rsdp.signature[4] == 'P' as u8 &&
-        rsdp.signature[5] == 'T' as u8 &&
-        rsdp.signature[6] == 'R' as u8 &&
-        rsdp.signature[7] == ' ' as u8;
+    let is_correct_signature = rsdp.signature[0] == 'R' as u8
+        && rsdp.signature[1] == 'S' as u8
+        && rsdp.signature[2] == 'D' as u8
+        && rsdp.signature[3] == ' ' as u8
+        && rsdp.signature[4] == 'P' as u8
+        && rsdp.signature[5] == 'T' as u8
+        && rsdp.signature[6] == 'R' as u8
+        && rsdp.signature[7] == ' ' as u8;
     if !is_correct_signature {
         return false;
     }
@@ -47,9 +46,8 @@ pub fn root_system_description_pointer_verification(rsdp_ptr: *const RootSystemD
     }
 
     if rsdp.revision >= 2 {
-        let rsdp_bytes = unsafe {
-            core::slice::from_raw_parts(rsdp_ptr as *const u8, rsdp.length as usize)
-        };
+        let rsdp_bytes =
+            unsafe { core::slice::from_raw_parts(rsdp_ptr as *const u8, rsdp.length as usize) };
         let mut sum = 0;
         for byte in rsdp_bytes {
             sum += *byte as usize;

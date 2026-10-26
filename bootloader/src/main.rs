@@ -6,6 +6,7 @@ use crate::uefi::{EfiStatus, EfiSystemTable};
 mod elf;
 mod uefi;
 
+use acpi::*;
 use console::{print, println};
 use core::arch::asm;
 use core::ffi::c_void;
@@ -13,7 +14,6 @@ use core::panic::PanicInfo;
 use elf::*;
 use spin::Once;
 use uefi::*;
-use acpi::*;
 
 pub const KERNEL_ALIGN: usize = 0x200000;
 
@@ -117,17 +117,8 @@ impl BootServices {
         Ok(address)
     }
 
-    pub fn free_pages(
-        &self,
-        memory: EfiPhysicalAddress,
-        pages: usize,
-    ) -> Result<(), UefiError> {
-        let status = unsafe {
-            (self.bs.free_pages)(
-                memory,
-                pages
-            )
-        };
+    pub fn free_pages(&self, memory: EfiPhysicalAddress, pages: usize) -> Result<(), UefiError> {
+        let status = unsafe { (self.bs.free_pages)(memory, pages) };
         efi_status_to_result(status)?;
         Ok(())
     }
@@ -374,16 +365,19 @@ pub unsafe extern "efiapi" fn efi_main(
     let entry_address = load_elf(hypervisor_base_addr as *const u64, &bs);
 
     let config_table = unsafe {
-        core::slice::from_raw_parts((*system_table).configuration_table, (*system_table).number_of_table_entries)
+        core::slice::from_raw_parts(
+            (*system_table).configuration_table,
+            (*system_table).number_of_table_entries,
+        )
     };
 
     let mut xsdt_address = core::ptr::null();
     for config in config_table {
         if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
-            let rsdp = unsafe {
-                &*(config.vendor_table as *const RootSystemDescriptionPointer)
-            };
-            if !root_system_description_pointer_verification(config.vendor_table as *const RootSystemDescriptionPointer) {
+            let rsdp = unsafe { &*(config.vendor_table as *const RootSystemDescriptionPointer) };
+            if !root_system_description_pointer_verification(
+                config.vendor_table as *const RootSystemDescriptionPointer,
+            ) {
                 panic!("RSDP is invalid!");
             }
             xsdt_address = (*rsdp).xsdt_address as *const u8;
@@ -452,13 +446,10 @@ fn allocate_pages_aligned(
     if align < EFI_ALLOC_ALIGN {
         align = EFI_ALLOC_ALIGN;
     }
-    
+
     let slack = align / EFI_PAGE_SIZE - 1;
 
-    let addr = bs.allocate_any_pages(
-        memory_type,
-        pages + slack
-    )?;
+    let addr = bs.allocate_any_pages(memory_type, pages + slack)?;
 
     let aligned = (addr as usize + align - 1) & !(align - 1);
     if slack > 0 {
