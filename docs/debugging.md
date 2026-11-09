@@ -15,7 +15,8 @@ cargo xtask test           # headless の起動テスト（CI と同じ）
 - `/dev/kvm` を開ければ `-enable-kvm -cpu host,+vmx` で起動する。HV が VMX を使うには KVM の nested 仮想化が必要
   - ホストで `cat /sys/module/kvm_intel/parameters/nested` が `Y` であること
   - TCG（ソフトウェアエミュレーション）は VMX をエミュレートしない
-- `/dev/kvm` がない環境（コンテナ内など）では警告を出し、TCG（`-cpu max`）で起動する。VMX を使う前の段階のテストならこれで足りる
+- `/dev/kvm` がない環境（コンテナ内など）では警告を出し、TCG（`-cpu max`）で起動する
+  - HV は起動時に VMX のセルフテストを行うので、TCG では `failed to enable VMX: NotSupported` で panic する。TCG はブートローダや VMX を有効にする前の処理を調べるとき（`--trace` など）に使う
 - `--trace`（`-d in_asm,int`）は TCG でしか動かないため、指定すると常に TCG で起動する
 - `--no-kvm` で明示的に TCG を使える
 
@@ -31,6 +32,7 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
 
 ### 起動テスト（`cargo xtask test`）
 
+- HV は VMX を有効にし、最小のテストゲスト（`vmx/selftest.rs`）で CPUID / VMCALL / CR4 / XSETBV の exit 処理を確認してから `[hypervisor] boot ok` を出す
 - HV のログに `[hypervisor] boot ok` が出れば成功
 - `[PANIC]` か `[EXCEPTION]` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
 - 管理 VM が起動するようになったら、判定条件を Linux のプロンプトに変更する（#6）
@@ -44,7 +46,7 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
 - **panic**: `[PANIC] <メッセージ>` を出して停止する
 - **CPU 例外**: `[EXCEPTION]` に続けてベクタ、エラーコード、汎用レジスタ、CR0/CR2/CR3/CR4 を出して停止する
   - #DF と NMI は IST の専用スタックで処理するので、スタックオーバーフローでもダンプが出る
-- VMX を使い始めたら、VM-entry failure とゲスト状態のダンプも追加する（#7）
+- **VMX**: VMLAUNCH / VMRESUME の失敗、VM-entry failure、処理できない exit では `[vmx]` に続けて exit reason とゲスト状態（RIP / RSP / CR / セグメント / 汎用レジスタ）をダンプする
 
 ## GDB
 

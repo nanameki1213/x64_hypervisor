@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use acpi::*;
 use console::println;
 use core::alloc::{GlobalAlloc, Layout};
@@ -144,6 +146,10 @@ extern "win64" fn main(boot_info: &BootInfo) {
 
     for entry in entries {
         if entry.signature == "FADT".as_bytes() {}
+    }
+
+    if let Err(e) = arch::x86_64::vmx::selftest::run() {
+        panic!("failed to enable VMX: {:?}", e);
     }
 
     println!("{}", BOOT_OK_MARKER);

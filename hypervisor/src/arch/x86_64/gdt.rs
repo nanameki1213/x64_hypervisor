@@ -98,3 +98,12 @@ pub fn init() {
         asm!("ltr {:x}", in(reg) TSS_SEL, options(nostack, preserves_flags));
     }
 }
+
+/// VMCS の TR base に設定する TSS のアドレス
+pub fn tss_base() -> u64 {
+    (&raw const TSS) as u64
+}
+
+pub fn tss_limit() -> u64 {
+    (size_of::<Tss>() - 1) as u64
+}
