@@ -8,9 +8,20 @@ use core::arch::asm;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 use core::ptr::NonNull;
-use serial::putc;
 
 use spin::Mutex;
+
+mod arch;
+
+/// HV のログ出力先。COM1 は管理 VM のコンソールに譲る
+const HV_LOG_PORT: u16 = serial::COM2;
+
+/// 起動テスト（`cargo xtask test`）が成功判定に使う文字列
+const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
+
+fn hv_putc(c: u8) {
+    serial::write_byte(HV_LOG_PORT, c);
+}
 
 pub struct BootInfo {
     pub acpi_xsdt_address: *const u8,
@@ -84,16 +95,16 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
 #[unsafe(no_mangle)]
 extern "win64" fn main(boot_info: &BootInfo) {
-    *console::CONSOLE.lock() = Some(console::Console::new(putc));
+    serial::init(HV_LOG_PORT);
+    *console::CONSOLE.lock() = Some(console::Console::new(hv_putc));
     println!("hello world from hypervisor.");
 
-    let mut i = 0;
-    loop {
+    arch::x86_64::init();
+
+    let num_descs = boot_info.map_size / boot_info.descriptor_size;
+    for i in 0..num_descs {
         let desc_ptr = (boot_info.map_buffer as usize + i * boot_info.descriptor_size)
-            as *mut EfiMemoryDescriptor;
-        if desc_ptr as usize > boot_info.map_buffer as usize + boot_info.map_size {
-            break;
-        }
+            as *const EfiMemoryDescriptor;
         unsafe {
             let desc = &*desc_ptr;
             if desc.memory_type == EfiMemoryType::ConventionalMemory as u32
@@ -111,7 +122,6 @@ extern "win64" fn main(boot_info: &BootInfo) {
                 );
             }
         }
-        i += 1;
     }
 
     let xsdt = unsafe { &*(boot_info.acpi_xsdt_address as *const Xsdt) };
@@ -131,6 +141,7 @@ extern "win64" fn main(boot_info: &BootInfo) {
         if entry.signature == "FADT".as_bytes() {}
     }
 
+    println!("{}", BOOT_OK_MARKER);
     halt_loop();
 }
 
@@ -141,6 +152,9 @@ fn halt_loop() -> ! {
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
+fn panic(info: &PanicInfo<'_>) -> ! {
+    // panic がコンソールのロック中に起きた可能性があるため、強制的に解放する
+    unsafe { console::CONSOLE.force_unlock() };
+    println!("[PANIC] {}", info);
     halt_loop();
 }
