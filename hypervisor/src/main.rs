@@ -14,6 +14,7 @@ use core::ptr::NonNull;
 use spin::Mutex;
 
 mod arch;
+mod mm;
 
 /// HV のログ出力先。COM1 は管理 VM のコンソールに譲る
 const HV_LOG_PORT: u16 = serial::COM2;
@@ -34,36 +35,6 @@ pub struct BootInfo {
     pub map_buffer: *const u8,
     pub map_size: usize,
     pub descriptor_size: usize,
-}
-
-/// EFI_MEMORY_DESCRIPTOR
-#[repr(C)]
-pub struct EfiMemoryDescriptor {
-    pub memory_type: u32,
-    pub physical_start: u64,
-    pub virtual_start: u64,
-    pub number_of_pages: u64,
-    pub attribute: u64,
-}
-
-#[repr(C)]
-pub enum EfiMemoryType {
-    ReservedMemoryType,
-    LoaderCode,
-    LoaderData,
-    BootServicesCode,
-    BootServicesData,
-    RuntimeServicesCode,
-    RuntimeServicesData,
-    ConventionalMemory,
-    UnusableMemory,
-    AcpiReclaimMemory,
-    AcpiMemoryNvs,
-    MemoryMappedIo,
-    MemoryMappedIoPortSpace,
-    PalCode,
-    PersistentMemory,
-    MaxMemoryType,
 }
 
 global_asm!(include_str!("boot.S"), options(att_syntax));
@@ -111,28 +82,25 @@ extern "win64" fn main(boot_info: &BootInfo) {
 
     arch::x86_64::init();
 
-    let num_descs = boot_info.map_size / boot_info.descriptor_size;
-    for i in 0..num_descs {
-        let desc_ptr = (boot_info.map_buffer as usize + i * boot_info.descriptor_size)
-            as *const EfiMemoryDescriptor;
-        unsafe {
-            let desc = &*desc_ptr;
-            if desc.memory_type == EfiMemoryType::ConventionalMemory as u32
-                || desc.memory_type == EfiMemoryType::BootServicesCode as u32
-                || desc.memory_type == EfiMemoryType::BootServicesData as u32
-            {
-                // 0番地からスタートするエントリはスキップ
-                if desc.physical_start == 0 {
-                    continue;
-                }
-
-                MEMORY_ALLOCATOR.lock().add_to_heap(
-                    desc.physical_start as usize,
-                    desc.number_of_pages as usize * 4096,
-                );
-            }
-        }
-    }
+    let layout = unsafe {
+        mm::init(
+            boot_info.map_buffer,
+            boot_info.map_size,
+            boot_info.descriptor_size,
+        )
+    };
+    println!(
+        "[mm] image {:#x}-{:#x}, heap {:#x}-{:#x}, memory map top {:#x}",
+        layout.image.start,
+        layout.image.end,
+        layout.heap.start,
+        layout.heap.end,
+        layout.memory_map_top
+    );
+    MEMORY_ALLOCATOR.lock().add_to_heap(
+        layout.heap.start as usize,
+        (layout.heap.end - layout.heap.start) as usize,
+    );
 
     let xsdt = unsafe { &*(boot_info.acpi_xsdt_address as *const Xsdt) };
     if !is_valid_signature(xsdt) {
@@ -151,7 +119,7 @@ extern "win64" fn main(boot_info: &BootInfo) {
         if entry.signature == "FADT".as_bytes() {}
     }
 
-    if let Err(e) = arch::x86_64::vmx::selftest::run() {
+    if let Err(e) = arch::x86_64::vmx::selftest::run(&layout) {
         if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
             println!("{}", VMX_UNAVAILABLE_MARKER);
         }

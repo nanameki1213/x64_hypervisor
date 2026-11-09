@@ -4,9 +4,10 @@ use core::arch::global_asm;
 
 use console::println;
 
+use super::ept::Ept;
 use super::exit::{self, ExitAction, StopReason};
 use super::vmcs::{self, field};
-use super::{alloc_zeroed_page, fixed_bits, vmcs_revision_id};
+use super::{alloc_zeroed_page, guest_fixed_bits, vmcs_revision_id};
 use crate::arch::x86_64::cpu::{self, CR4_VMXE};
 
 /// VMCS に含まれない汎用レジスタ。`vmx_run` / `vmx_exit_entry` のオフセットと一致させること
@@ -41,6 +42,8 @@ pub struct GuestConfig {
 
 pub struct Vcpu {
     pub regs: GuestRegs,
+    /// TODO(#8): 複数 vCPU で 1 つの VM の EPT を共有する
+    pub ept: Ept,
     vmcs: u64,
     launched: bool,
 }
@@ -51,6 +54,9 @@ pub struct Vcpu {
 const CPU_HLT_EXITING: u32 = 1 << 7;
 const CPU_USE_MSR_BITMAPS: u32 = 1 << 28;
 const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
+// secondary processor-based
+const CPU2_ENABLE_EPT: u32 = 1 << 1;
+const CPU2_UNRESTRICTED_GUEST: u32 = 1 << 7;
 // secondary processor-based（対応していれば有効にする。無効だとゲストで #UD になる）
 const CPU2_ENABLE_RDTSCP: u32 = 1 << 3;
 const CPU2_ENABLE_INVPCID: u32 = 1 << 12;
@@ -213,9 +219,25 @@ fn build_msr_bitmap() -> u64 {
     bitmap as u64
 }
 
+/// unrestricted guest ではゲストが CR0.PG を切り替えて IA-32e モードを出入りできるが、
+/// VM-entry の "IA-32e mode guest" は自動では更新されないので、EFER.LMA に合わせる
+fn sync_ia32e_mode() {
+    const EFER_LMA: u64 = 1 << 10;
+    let entry = vmcs::read(field::VM_ENTRY_CONTROLS);
+    let lma = vmcs::read(field::GUEST_IA32_EFER) & EFER_LMA != 0;
+    let want = if lma {
+        entry | ENTRY_IA32E_MODE_GUEST as u64
+    } else {
+        entry & !(ENTRY_IA32E_MODE_GUEST as u64)
+    };
+    if want != entry {
+        vmcs::write(field::VM_ENTRY_CONTROLS, want);
+    }
+}
+
 impl Vcpu {
     /// VMCS を確保してカレントにし、64bit モードのゲストとして初期化する
-    pub fn new(config: &GuestConfig) -> Self {
+    pub fn new(config: &GuestConfig, ept: Ept) -> Self {
         let vmcs_region = alloc_zeroed_page();
         unsafe {
             *(vmcs_region as *mut u32) = vmcs_revision_id();
@@ -225,6 +247,7 @@ impl Vcpu {
 
         let vcpu = Vcpu {
             regs: GuestRegs::default(),
+            ept,
             vmcs: vmcs_region,
             launched: false,
         };
@@ -264,7 +287,8 @@ impl Vcpu {
         let secondary = adjust_controls(
             "secondary processor-based",
             cpu::IA32_VMX_PROCBASED_CTLS2,
-            0,
+            // unrestricted guest は AP をリアルモードから起動するのに必要（#8）
+            CPU2_ENABLE_EPT | CPU2_UNRESTRICTED_GUEST,
             CPU2_ENABLE_RDTSCP | CPU2_ENABLE_INVPCID | CPU2_ENABLE_XSAVES,
         );
         let exit = adjust_controls(
@@ -297,10 +321,11 @@ impl Vcpu {
         vmcs::write(field::VM_ENTRY_MSR_LOAD_COUNT, 0);
         vmcs::write(field::VM_ENTRY_INTR_INFO, 0);
         vmcs::write(field::MSR_BITMAP, build_msr_bitmap());
+        vmcs::write(field::EPT_POINTER, self.ept.eptp());
 
         // CR0 / CR4 の VMX で固定されたビットはホストが持ち、ゲストの書き込みを捕捉する。
         // CR4.VMXE はゲストからは 0 に見せる
-        let fixed = fixed_bits();
+        let fixed = guest_fixed_bits();
         vmcs::write(
             field::CR0_GUEST_HOST_MASK,
             fixed.cr0_fixed1 | !fixed.cr0_allowed,
@@ -469,7 +494,7 @@ impl Vcpu {
             self.launched = true;
 
             match exit::handle(self) {
-                ExitAction::Resume => {}
+                ExitAction::Resume => sync_ia32e_mode(),
                 ExitAction::Stop(reason) => return reason,
             }
         }

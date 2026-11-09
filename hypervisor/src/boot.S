@@ -39,8 +39,8 @@ _start:
     rep stosq
 
     # 恒等マッピング:
-    # 物理メモリ全体をヒープとして登録するため、下位 512GiB を 1GiB ページで恒等マップする
-    # TODO(#9): HV のアドレス空間（直接マップ）を設計したら置き換える
+    # 下位 512GiB を 1GiB ページで恒等マップする
+    # これが HV の物理メモリの直接マップになる（docs/memory.md）
     lea   boot_pdpt_low(%rip), %rax
     mov   $512, %ecx
     mov   $(PTE_P | PTE_W | PTE_PS), %rdx
@@ -92,6 +92,10 @@ _start:
 
     mov   %rcx, %cr3
 
+    # HV が自身の物理配置を知るために、ロード先の物理アドレスを保存する
+    movabs $hv_image_phys_base, %rax
+    mov   %rsi, (%rax)
+
     # 上位アドレスのスタックに切り替え、上位アドレスの main を呼ぶ
     movabs $boot_stack_top, %rsp
     sub   $32, %rsp # win64 ABI のシャドウスペース
@@ -102,6 +106,11 @@ _start:
 .Lhalt:
     hlt
     jmp   .Lhalt
+
+.section .data
+.balign 8
+.global hv_image_phys_base
+hv_image_phys_base: .quad 0
 
 .section .bss
 .balign 4096

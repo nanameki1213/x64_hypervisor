@@ -1,17 +1,24 @@
-//! VT-x 基盤の動作確認用の最小ゲスト。
+//! VT-x / EPT の動作確認。
 //!
-//! HV と同じページテーブル・GDT・IDT を使って HV のテキスト上のコードを実行し、
-//! CPUID / VMCALL / CR4 / XSETBV の扱いを確認して、結果を R12 に入れて HLT する。
+//! 1. 管理 VM 用の EPT を作り、HV の物理メモリがマップされていないことを確認する
+//! 2. 最小のゲストを実行する。ゲストは HV と同じページテーブル・GDT・IDT を使って HV のテキスト上の
+//!    コードを実行し、CPUID / VMCALL / CR4 / XSETBV / EPT の遅延マップの扱いを確認して結果を R12 に
+//!    入れ、最後に HV のヒープを読んで EPT violation で止められる
+//!
+//! ゲストが HV のイメージを使うため、テストゲストの EPT では HV のヒープだけを隠す。
 //! TODO(#6): 管理 VM（Linux）を起動するようになったら起動経路から外す
 
 use core::arch::global_asm;
+use core::ops::Range;
 
 use console::println;
 
+use super::VmxInitError;
+use super::ept::Ept;
 use super::exit::StopReason;
 use super::vcpu::{GuestConfig, Vcpu};
-use super::{VmxInitError, alloc_zeroed_page};
 use crate::arch::x86_64::cpu;
+use crate::mm::{MemoryLayout, PAGE_SIZE_1G, align_up};
 
 /// テストゲストが R12 に立てるビット
 const CHECK_HV_SIGNATURE: u64 = 1 << 0;
@@ -21,18 +28,29 @@ const CHECK_VMCALL_UNSUPPORTED: u64 = 1 << 3;
 const CHECK_CR4_VMXE_HIDDEN: u64 = 1 << 4;
 /// XSAVE 非対応の CPU では実行せずに立てる
 const CHECK_XSETBV: u64 = 1 << 5;
+const CHECK_LAZY_MAP: u64 = 1 << 6;
 const ALL_CHECKS: u64 = CHECK_HV_SIGNATURE
     | CHECK_VMX_HIDDEN
     | CHECK_HYPERVISOR_BIT
     | CHECK_VMCALL_UNSUPPORTED
     | CHECK_CR4_VMXE_HIDDEN
-    | CHECK_XSETBV;
+    | CHECK_XSETBV
+    | CHECK_LAZY_MAP;
+
+const GUEST_STACK_SIZE: usize = 0x2000;
+
+#[repr(C, align(16))]
+struct GuestStack([u8; GUEST_STACK_SIZE]);
+
+/// テストゲストのスタック。HV のヒープはゲストから見えないので、イメージ内に置く
+static mut GUEST_STACK: GuestStack = GuestStack([0; GUEST_STACK_SIZE]);
 
 unsafe extern "C" {
     fn vmx_selftest_guest();
 }
 
-// "x64-" をリトルエンディアンで読んだ値（exit::HV_SIGNATURE の先頭 4 バイト）
+// 入力: R13 = 起動時にマップしていないアドレス、R14 = HV のヒープのアドレス
+// "x64-" をリトルエンディアンで読んだ値は exit::HV_SIGNATURE の先頭 4 バイト
 global_asm!(
     r#"
 .section .text
@@ -87,6 +105,13 @@ vmx_selftest_guest:
 6:
     or    $0x20, %r12
 
+    # 起動時にマップしていないアドレスは、EPT violation を契機に遅延マップされて読める
+    mov   (%r13), %rax
+    or    $0x40, %r12
+
+    # HV のヒープは EPT でマップされていないので、ここで止められる
+    mov   (%r14), %rax
+
 9:
     cli
     hlt
@@ -95,26 +120,92 @@ vmx_selftest_guest:
     options(att_syntax)
 );
 
-pub fn run() -> Result<(), VmxInitError> {
+/// 起動時に管理 VM の EPT で恒等マップする範囲。
+/// 下位 4GiB（MMIO を含む）と UEFI のメモリマップに載っている範囲をまとめてマップし、
+/// それより上（64bit BAR など）は EPT violation のときに遅延マップする
+pub fn initial_identity_range(layout: &MemoryLayout) -> Range<u64> {
+    0..align_up(layout.memory_map_top.max(4 * PAGE_SIZE_1G), PAGE_SIZE_1G)
+}
+
+/// 管理 VM 用の EPT で、HV のメモリが隠れていて、それ以外が恒等マップされていることを確認する
+fn check_management_vm_ept(layout: &MemoryLayout) {
+    let reserved = layout.reserved();
+    let is_reserved = |gpa: u64| reserved.iter().any(|r| r.contains(&gpa));
+
+    let mut ept = Ept::new(&reserved).expect("EPT is not supported");
+    let range = initial_identity_range(layout);
+    ept.map_identity(range.clone());
+
+    for r in &reserved {
+        for gpa in [r.start, r.start + 0x1000, r.end - 1] {
+            assert!(
+                ept.translate(gpa).is_none(),
+                "HV memory {:#x} is mapped in the management VM's EPT",
+                gpa
+            );
+        }
+        // HV のメモリの直前・直後は恒等マップされている
+        for gpa in [r.start.wrapping_sub(1), r.end] {
+            if gpa < range.end && !is_reserved(gpa) {
+                assert_eq!(
+                    ept.translate(gpa),
+                    Some(gpa),
+                    "{:#x} is not identity mapped",
+                    gpa
+                );
+            }
+        }
+    }
+    // 低位メモリ、ROM 領域、LAPIC、4GiB 直下
+    for gpa in [0, 0x9_f000, 0xf_0000, 0xfee0_0000, 4 * PAGE_SIZE_1G - 1] {
+        assert_eq!(
+            ept.translate(gpa),
+            Some(gpa),
+            "{:#x} is not identity mapped",
+            gpa
+        );
+    }
+
+    let stats = ept.stats();
+    println!(
+        "[ept] management VM: identity {:#x}-{:#x}, 1G={} 2M={} 4K={} tables={}",
+        range.start, range.end, stats.pages_1g, stats.pages_2m, stats.pages_4k, stats.tables
+    );
+}
+
+pub fn run(layout: &MemoryLayout) -> Result<(), VmxInitError> {
     super::enable()?;
 
-    let stack = alloc_zeroed_page();
+    check_management_vm_ept(layout);
+
+    let mut ept = Ept::new(core::slice::from_ref(&layout.heap)).expect("EPT is not supported");
+    let initial = initial_identity_range(layout);
+    ept.map_identity(initial.clone());
+    let lazy_gpa = initial.end + PAGE_SIZE_1G;
+    assert!(ept.translate(lazy_gpa).is_none());
+
     let config = GuestConfig {
         rip: vmx_selftest_guest as *const () as u64,
-        rsp: stack + 4096,
+        rsp: (&raw const GUEST_STACK) as u64 + GUEST_STACK_SIZE as u64,
         cr3: cpu::read_cr3(),
         hlt_exiting: true,
     };
-    let mut vcpu = Vcpu::new(&config);
+    let mut vcpu = Vcpu::new(&config, ept);
+    vcpu.regs.r13 = lazy_gpa;
+    vcpu.regs.r14 = layout.heap.start;
     let reason = vcpu.run();
 
-    let result = vcpu.regs.r12;
-    if reason != StopReason::GuestHalted || result != ALL_CHECKS {
+    let checks = vcpu.regs.r12;
+    let expected = StopReason::HvMemoryAccess {
+        gpa: layout.heap.start,
+    };
+    if reason != expected || checks != ALL_CHECKS {
         panic!(
-            "VMX self test failed: stop reason={:?}, checks={:#x} (expected {:#x})",
-            reason, result, ALL_CHECKS
+            "VMX self test failed: stop reason={:?} (expected {:?}), checks={:#x} (expected {:#x})",
+            reason, expected, checks, ALL_CHECKS
         );
     }
-    println!("[vmx] self test passed (checks={:#x})", result);
+    assert_eq!(vcpu.ept.translate(lazy_gpa), Some(lazy_gpa));
+    println!("[vmx] self test passed (checks={:#x})", checks);
     Ok(())
 }
