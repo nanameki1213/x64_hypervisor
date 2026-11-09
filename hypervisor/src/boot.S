@@ -4,6 +4,7 @@
 
 .set PAGE_2M_SIZE,    0x200000
 .set PAGE_2M_MASK,    PAGE_2M_SIZE - 1
+.set PAGE_1G_SIZE,    0x40000000
 .set BOOT_STACK_SIZE, 0x10000
 
 .section .text.boot, "ax"
@@ -25,26 +26,27 @@ _start:
     test  $PAGE_2M_MASK, %rsi
     jnz   .Lhalt
 
-    # ページテーブル 5 枚をゼロクリア
+    # 恒等マッピングに 1GiB ページを使うので、未対応なら停止
+    mov   $0x80000001, %eax
+    cpuid
+    bt    $26, %edx # Page1GB
+    jnc   .Lhalt
+
+    # ページテーブル 4 枚をゼロクリア
     lea   boot_pml4(%rip), %rdi
-    mov   $(5 * 512), %ecx
+    mov   $(4 * 512), %ecx
     xor   %eax, %eax
     rep stosq
 
     # 恒等マッピング:
-    # pd_low[(phys >> 21) & 0x1ff] 以降を phys から 2MiB ずつ埋める
-    mov   %rsi, %rdi
-    shr   $21, %rdi
-    and   $0x1ff, %rdi
-    lea   boot_pd_low(%rip), %rax
-    lea   (%rax, %rdi, 8), %rax
+    # 物理メモリ全体をヒープとして登録するため、下位 512GiB を 1GiB ページで恒等マップする
+    # TODO(#9): HV のアドレス空間（直接マップ）を設計したら置き換える
+    lea   boot_pdpt_low(%rip), %rax
     mov   $512, %ecx
-    sub   %edi, %ecx
-    mov   %rsi, %rdx
-    or    $(PTE_P | PTE_W | PTE_PS), %rdx
+    mov   $(PTE_P | PTE_W | PTE_PS), %rdx
 1:  mov   %rdx, (%rax)
     add   $8, %rax
-    add   $PAGE_2M_SIZE, %rdx
+    add   $PAGE_1G_SIZE, %rdx
     dec   %ecx
     jnz   1b
 
@@ -65,15 +67,6 @@ _start:
     dec   %ecx
     jnz   2b
 
-    # pdpt_low[(phys >> 30) & 0x1ff] = pd_low
-    mov   %rsi, %rdi
-    shr   $30, %rdi
-    and   $0x1ff, %rdi
-    lea   boot_pd_low(%rip), %rax
-    or    $(PTE_P | PTE_W), %rax
-    lea   boot_pdpt_low(%rip), %rdx
-    mov   %rax, (%rdx, %rdi, 8)
-
     # pdpt_high[(virt >> 30) & 0x1ff] = pd_high
     mov   %r8, %rdi
     shr   $30, %rdi
@@ -83,14 +76,11 @@ _start:
     lea   boot_pdpt_high(%rip), %rdx
     mov   %rax, (%rdx, %rdi, 8)
 
-    # pml4[(phys >> 39) & 0x1ff] = pdpt_low
+    # pml4[0] = pdpt_low
     lea   boot_pml4(%rip), %rcx
-    mov   %rsi, %rdi
-    shr   $39, %rdi
-    and   $0x1ff, %rdi
     lea   boot_pdpt_low(%rip), %rax
     or    $(PTE_P | PTE_W), %rax
-    mov   %rax, (%rcx, %rdi, 8)
+    mov   %rax, (%rcx)
 
     # pml4[(virt >> 39) & 0x1ff] = pdpt_high
     mov   %r8, %rdi
@@ -118,7 +108,6 @@ _start:
 boot_pml4:      .skip 4096
 boot_pdpt_low:  .skip 4096
 boot_pdpt_high: .skip 4096
-boot_pd_low:    .skip 4096
 boot_pd_high:   .skip 4096
 
 .balign 16
