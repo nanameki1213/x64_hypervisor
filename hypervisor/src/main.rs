@@ -23,6 +23,7 @@ fn hv_putc(c: u8) {
     serial::write_byte(HV_LOG_PORT, c);
 }
 
+#[derive(Clone, Copy)]
 pub struct BootInfo {
     pub acpi_xsdt_address: *const u8,
     pub map_buffer: *const u8,
@@ -95,6 +96,10 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
 #[unsafe(no_mangle)]
 extern "win64" fn main(boot_info: &BootInfo) {
+    // BootInfo はブートローダのスタック（BootServicesData）上にあり、
+    // その領域をヒープとして再利用すると壊れるので、最初にコピーしておく
+    let boot_info = *boot_info;
+
     serial::init(HV_LOG_PORT);
     *console::CONSOLE.lock() = Some(console::Console::new(hv_putc));
     println!("hello world from hypervisor.");
