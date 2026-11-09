@@ -141,12 +141,15 @@ pub fn calclate_checksum<T: AcpiTable>(table: &T) -> bool {
     let header = table.header();
 
     let header_bytes = unsafe {
-        core::slice::from_raw_parts(&raw const header as *const u8, header.length as usize)
+        core::slice::from_raw_parts(
+            header as *const AcpiTableHeader as *const u8,
+            header.length as usize,
+        )
     };
 
-    let mut sum = 0;
-    for byte in header_bytes {
-        sum += byte;
+    let mut sum: u8 = 0;
+    for &byte in header_bytes {
+        sum = sum.wrapping_add(byte);
     }
 
     if sum != 0 {
