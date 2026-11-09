@@ -99,6 +99,8 @@ const GUEST_LOG: &str = "guest.log";
 
 /// 起動テストの成功判定に使う文字列（hypervisor/src/main.rs の BOOT_OK_MARKER と一致させる）
 const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
+/// CPU が VMX に対応していないときに HV が出す文字列（hypervisor/src/main.rs の VMX_UNAVAILABLE_MARKER と一致させる）
+const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
 /// 起動テストを即座に失敗させる文字列
 const FAILURE_MARKERS: [&str; 2] = ["[PANIC]", "[EXCEPTION]"];
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 60;
@@ -326,9 +328,11 @@ fn test() -> Result<(), DynError> {
     let (opts, rest) = QemuOptions::parse(&args)?;
 
     let mut timeout = Duration::from_secs(DEFAULT_TEST_TIMEOUT_SECS);
+    let mut allow_no_vmx = false;
     let mut iter = rest.iter();
     while let Some(v) = iter.next() {
         match v.as_str() {
+            "--allow-no-vmx" => allow_no_vmx = true,
             "--timeout" => {
                 let secs = iter.next().ok_or("--timeout requires seconds.")?;
                 timeout = Duration::from_secs(
@@ -362,6 +366,13 @@ fn test() -> Result<(), DynError> {
     let result = loop {
         let log = fs::read_to_string(&hv_log).unwrap_or_default();
         if log.contains(BOOT_OK_MARKER) {
+            break Ok(());
+        }
+        // HV はこの文字列を出した直後に panic するので、失敗判定より先に見る
+        if allow_no_vmx && log.contains(VMX_UNAVAILABLE_MARKER) {
+            eprintln!(
+                "warning: VMX が使えないため、VMX を有効にする手前までを確認して成功とします"
+            );
             break Ok(());
         }
         if let Some(marker) = FAILURE_MARKERS.iter().find(|m| log.contains(*m)) {
@@ -423,6 +434,7 @@ run Options:
 
 test Options:
   --timeout <SECS>   起動完了を待つ秒数（デフォルト {timeout}）
+  --allow-no-vmx     VMX が使えない環境では、HV が VMX を有効にする手前まで起動すれば成功とする（CI 用）
 
 Environment:
   OVMF_CODE / OVMF_VARS  OVMF のパスを上書きする（デフォルトは edk2 のビルド成果物）",

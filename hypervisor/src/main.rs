@@ -20,6 +20,9 @@ const HV_LOG_PORT: u16 = serial::COM2;
 
 /// 起動テスト（`cargo xtask test`）が成功判定に使う文字列
 const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
+/// CPU が VMX に対応していないときに出す文字列。
+/// nested VMX が使えない CI では、`cargo xtask test --allow-no-vmx` がこれを成功とみなす
+const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
 
 fn hv_putc(c: u8) {
     serial::write_byte(HV_LOG_PORT, c);
@@ -149,6 +152,9 @@ extern "win64" fn main(boot_info: &BootInfo) {
     }
 
     if let Err(e) = arch::x86_64::vmx::selftest::run() {
+        if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
+            println!("{}", VMX_UNAVAILABLE_MARKER);
+        }
         panic!("failed to enable VMX: {:?}", e);
     }
 

@@ -35,6 +35,9 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
 - HV は VMX を有効にし、最小のテストゲスト（`vmx/selftest.rs`）で CPUID / VMCALL / CR4 / XSETBV の exit 処理を確認してから `[hypervisor] boot ok` を出す
 - HV のログに `[hypervisor] boot ok` が出れば成功
 - `[PANIC]` か `[EXCEPTION]` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
+- `--allow-no-vmx`: CPU が VMX に対応していない場合、HV が `[hypervisor] VMX is not available on this CPU` を出した時点で成功とする
+  - GitHub Actions のランナーは KVM は使えるが nested VMX は使えないため、CI ではこれを付けて VMX の手前までを確認している
+  - **VMX 以降の動作は CI では確認されない**。VMX に関わる変更は、nested KVM が使える環境で `cargo xtask test`（`--allow-no-vmx` なし）を実行して確認すること
 - 管理 VM が起動するようになったら、判定条件を Linux のプロンプトに変更する（#6）
 
 ### OVMF
