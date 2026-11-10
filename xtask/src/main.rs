@@ -112,6 +112,8 @@ const FAILURE_MARKERS: [&str; 3] = [
 ];
 /// 管理 VM の initramfs が起動したときに出す文字列（linux/init と一致させる）
 const GUEST_OK_MARKER: &str = "[guest] initramfs ok";
+/// 管理 VM の initramfs が出す、オンラインの CPU 数の行（linux/init と一致させる）
+const GUEST_CPUS_PREFIX: &str = "[guest] online CPUs: ";
 /// 起動テストを即座に失敗させる管理 VM のコンソールの文字列
 const GUEST_FAILURE_MARKERS: [&str; 1] = ["Kernel panic"];
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 60;
@@ -436,7 +438,8 @@ fn test() -> Result<(), DynError> {
         }
         let log = fs::read_to_string(&hv_log).unwrap_or_default();
         let guest = String::from_utf8_lossy(&fs::read(&guest_log).unwrap_or_default()).into_owned();
-        check_hv_memory_hidden(&log, &guest)
+        check_hv_memory_hidden(&log, &guest)?;
+        check_all_cpus_in_guest(&log, &guest)
     });
 
     match result {
@@ -505,6 +508,48 @@ fn check_hv_memory_hidden(hv_log: &str, guest_log: &str) -> Result<(), String> {
     }
     eprintln!(
         "HV のメモリ（image / heap）が管理 VM の e820 で usable になっていないことを確認しました"
+    );
+    Ok(())
+}
+
+/// HV が起動した CPU（HV のログの `[smp] N CPUs` 行）がすべて管理 VM で動いていることを確かめる。
+/// 管理 VM から見えるオンラインの CPU 数が一致し、AP ごとに HV が SIPI の VM exit を処理していること
+/// （= AP が VMX non-root で動いていること）
+fn check_all_cpus_in_guest(hv_log: &str, guest_log: &str) -> Result<(), String> {
+    let cpus: usize = hv_log
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("[smp] ")?
+                .split_once(" CPUs")?
+                .0
+                .parse()
+                .ok()
+        })
+        .ok_or("HV log has no [smp] line")?;
+    let guest_cpus: usize = guest_log
+        .lines()
+        .find_map(|l| l.strip_prefix(GUEST_CPUS_PREFIX)?.trim().parse().ok())
+        .ok_or("the management VM did not report its CPU count")?;
+    if guest_cpus != cpus {
+        return Err(format!(
+            "the management VM sees {} CPUs, but the HV started {}",
+            guest_cpus, cpus
+        ));
+    }
+    let sipis = hv_log
+        .lines()
+        .filter(|l| l.starts_with("[vmx] SIPI "))
+        .count();
+    if sipis != cpus - 1 {
+        return Err(format!(
+            "expected a SIPI exit on each of the {} APs, got {}",
+            cpus - 1,
+            sipis
+        ));
+    }
+    eprintln!(
+        "管理 VM が {} CPU すべてで動いていることを確認しました（AP の SIPI exit: {}）",
+        cpus, sipis
     );
     Ok(())
 }
