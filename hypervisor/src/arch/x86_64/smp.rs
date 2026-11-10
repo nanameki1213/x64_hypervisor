@@ -5,10 +5,16 @@ use alloc::alloc::Layout;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use console::println;
+use spin::{Mutex, Once};
 
+use super::vmx::{
+    self,
+    ept::Ept,
+    vcpu::{GuestConfig, Vcpu},
+};
 use super::{cpu, gdt, idt};
 use crate::mm::{self, EfiMemoryMap, MemoryLayout, PAGE_SIZE_4K};
 
@@ -167,9 +173,38 @@ extern "C" fn ap_entry(start: &'static ApStart) -> ! {
         current_apic_id()
     );
     start.online.store(true, Ordering::Release);
-    // TODO(#8): VMXON して、管理 VM の vCPU として wait-for-SIPI で待つ
+
+    if let Err(e) = vmx::enable() {
+        panic!("AP {}: failed to enable VMX: {:?}", start.index, e);
+    }
+    // BSP が管理 VM の EPT を作るまで待ち、管理 VM の vCPU として SIPI を待つ。
+    // 管理 VM の Linux が送った INIT / SIPI は VM exit になり、vCPU の状態に反映される
+    let ept = *MANAGEMENT_VM_EPT.wait();
+    let mut vcpu = Vcpu::new(&GuestConfig::wait_for_sipi(), ept);
+    APS_IN_GUEST.fetch_add(1, Ordering::Release);
+    let reason = vcpu.run();
+    println!(
+        "{} (AP {}): {:?}",
+        crate::GUEST_STOPPED_MARKER,
+        start.index,
+        reason
+    );
     loop {
         unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
+    }
+}
+
+/// 管理 VM の EPT。BSP が管理 VM を起動するときに設定し、AP はそれを待ってから vCPU を作る
+pub static MANAGEMENT_VM_EPT: Once<&'static Mutex<Ept>> = Once::new();
+static APS_ONLINE: AtomicUsize = AtomicUsize::new(0);
+static APS_IN_GUEST: AtomicUsize = AtomicUsize::new(0);
+
+/// 起動したすべての AP が、管理 VM の vCPU として SIPI を待つ状態になるまで待つ。
+/// 管理 VM の Linux が AP を起こす（INIT-SIPI-SIPI）前に呼ぶこと
+pub fn wait_for_aps_in_guest() {
+    let online = APS_ONLINE.load(Ordering::Acquire);
+    while APS_IN_GUEST.load(Ordering::Acquire) < online {
+        core::hint::spin_loop();
     }
 }
 
@@ -337,6 +372,7 @@ pub unsafe fn start_aps(
         }
         if timer.wait_until(AP_START_TIMEOUT_US, || start.online.load(Ordering::Acquire)) {
             online += 1;
+            APS_ONLINE.store(online, Ordering::Release);
         } else {
             println!("[smp] AP {} (APIC ID {}) did not start", index, apic_id);
         }

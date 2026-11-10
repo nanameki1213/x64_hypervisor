@@ -91,7 +91,12 @@ pub struct GuestConfig {
     pub idtr: DescriptorTable,
     /// HLT で VM exit するか。管理 VM では物理 CPU をそのまま止めたいので false にする
     pub hlt_exiting: bool,
+    /// `ACTIVITY_ACTIVE` か `ACTIVITY_WAIT_FOR_SIPI`
+    pub activity_state: u32,
 }
+
+pub const ACTIVITY_ACTIVE: u32 = 0;
+pub const ACTIVITY_WAIT_FOR_SIPI: u32 = 3;
 
 impl GuestConfig {
     /// HV と同じ GDT / IDT / TSS / ページテーブルを使う 64bit モードのゲスト（セルフテスト用）
@@ -129,6 +134,7 @@ impl GuestConfig {
                 limit: idtr.limit,
             },
             hlt_exiting,
+            activity_state: ACTIVITY_ACTIVE,
         }
     }
 
@@ -176,6 +182,62 @@ impl GuestConfig {
             gdtr,
             idtr: DescriptorTable { base: 0, limit: 0 },
             hlt_exiting: false,
+            activity_state: ACTIVITY_ACTIVE,
+        }
+    }
+
+    /// INIT を受けた直後の CPU（リアルモード）で、SIPI を待つ状態（AP の初期状態）。
+    /// SIPI を受けたら exit::handle_sipi が CS:IP を設定して実行を始める
+    pub fn wait_for_sipi() -> Self {
+        // INIT 後の値（SDM Vol. 3A 10.1.1 Table 10-1）
+        const CR0_INIT: u64 = 0x6000_0010; // CD, NW, ET
+        let data = Segment {
+            selector: 0,
+            base: 0,
+            limit: 0xffff,
+            access_rights: AR_REAL_DATA,
+        };
+        GuestConfig {
+            rip: 0xfff0,
+            rsp: 0,
+            rflags: RFLAGS_RESERVED,
+            cr0: CR0_INIT,
+            cr3: 0,
+            cr4: 0,
+            efer: 0,
+            cs: Segment {
+                selector: 0xf000,
+                base: 0xffff_0000,
+                limit: 0xffff,
+                access_rights: AR_REAL_CODE,
+            },
+            ss: data,
+            ds: data,
+            es: data,
+            fs: data,
+            gs: data,
+            tr: Segment {
+                selector: 0,
+                base: 0,
+                limit: 0xffff,
+                access_rights: AR_TSS64_BUSY,
+            },
+            ldtr: Segment {
+                selector: 0,
+                base: 0,
+                limit: 0xffff,
+                access_rights: AR_LDT,
+            },
+            gdtr: DescriptorTable {
+                base: 0,
+                limit: 0xffff,
+            },
+            idtr: DescriptorTable {
+                base: 0,
+                limit: 0xffff,
+            },
+            hlt_exiting: false,
+            activity_state: ACTIVITY_WAIT_FOR_SIPI,
         }
     }
 }
@@ -219,6 +281,9 @@ const AR_CODE64: u32 = 0xa09b; // type=0xb, S, DPL0, P, L, G
 const AR_DATA: u32 = 0xc093; // type=0x3, S, DPL0, P, D/B, G
 const AR_TSS64_BUSY: u32 = 0x008b; // type=0xb, P
 const AR_UNUSABLE: u32 = 1 << 16;
+pub(super) const AR_REAL_CODE: u32 = 0x009b; // type=0xb, S, P
+const AR_REAL_DATA: u32 = 0x0093; // type=0x3, S, P
+const AR_LDT: u32 = 0x0082; // type=0x2, P
 
 const RFLAGS_RESERVED: u64 = 1 << 1;
 
@@ -382,6 +447,14 @@ fn sync_ia32e_mode() {
 impl Vcpu {
     /// VMCS を確保してカレントにし、64bit モードのゲストとして初期化する
     pub fn new(config: &GuestConfig, ept: &'static Mutex<Ept>) -> Self {
+        const IA32_VMX_MISC: u32 = 0x485;
+        const MISC_WAIT_FOR_SIPI: u64 = 1 << 8;
+        if config.activity_state == ACTIVITY_WAIT_FOR_SIPI {
+            assert!(
+                cpu::rdmsr(IA32_VMX_MISC) & MISC_WAIT_FOR_SIPI != 0,
+                "the wait-for-SIPI activity state is not supported"
+            );
+        }
         let vmcs_region = alloc_zeroed_page();
         unsafe {
             *(vmcs_region as *mut u32) = vmcs_revision_id();
@@ -622,10 +695,18 @@ impl Vcpu {
         vmcs::write(field::GUEST_RIP, config.rip);
         vmcs::write(field::GUEST_RSP, config.rsp);
         vmcs::write(field::GUEST_RFLAGS, config.rflags);
-        vmcs::write(field::GUEST_ACTIVITY_STATE, 0);
+        vmcs::write(field::GUEST_ACTIVITY_STATE, config.activity_state as u64);
         vmcs::write(field::GUEST_INTERRUPTIBILITY_INFO, 0);
         vmcs::write(field::GUEST_PENDING_DBG_EXCEPTIONS, 0);
         vmcs::write(field::VMCS_LINK_POINTER, u64::MAX);
+    }
+
+    /// ゲストの状態を `config` で置き換える（INIT を受けたときなど）。汎用レジスタは 0 にする
+    pub(super) fn reset(&mut self, config: &GuestConfig) {
+        self.regs = GuestRegs::default();
+        self.setup_guest_state(config);
+        vmcs::write(field::VM_ENTRY_INTR_INFO, 0);
+        sync_ia32e_mode();
     }
 
     /// ゲストを実行し、exit を処理し続ける。ゲストを止める必要が生じたら理由を返す

@@ -12,6 +12,7 @@ use core::ops::Range;
 use boot_info::LinuxImage;
 use console::println;
 
+use crate::arch::x86_64::smp;
 use crate::arch::x86_64::vmx::StopReason;
 use crate::arch::x86_64::vmx::ept;
 use crate::arch::x86_64::vmx::vcpu::{DescriptorTable, GuestConfig, Vcpu};
@@ -403,6 +404,9 @@ pub fn boot(
     let ept = ept::management_vm(layout)
         .expect("EPT is not supported")
         .into_shared();
+    // AP は管理 VM の vCPU として、Linux が SIPI を送るのを待つ
+    smp::MANAGEMENT_VM_EPT.call_once(|| ept);
+    smp::wait_for_aps_in_guest();
     let mut vcpu = Vcpu::new(&prepared.config, ept);
     // 64bit boot protocol: RSI に boot_params の物理アドレス
     vcpu.regs.rsi = prepared.boot_params;
