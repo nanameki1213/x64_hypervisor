@@ -2,6 +2,7 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod mtrr;
+pub mod smp;
 pub mod vmx;
 
 /// HV 自身の GDT / TSS / IDT を設定する。
