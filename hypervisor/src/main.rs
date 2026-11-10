@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use acpi::*;
 use console::println;
 use core::alloc::{GlobalAlloc, Layout};
@@ -18,11 +20,15 @@ const HV_LOG_PORT: u16 = serial::COM2;
 
 /// 起動テスト（`cargo xtask test`）が成功判定に使う文字列
 const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
+/// CPU が VMX に対応していないときに出す文字列。
+/// nested VMX が使えない CI では、`cargo xtask test --allow-no-vmx` がこれを成功とみなす
+const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
 
 fn hv_putc(c: u8) {
     serial::write_byte(HV_LOG_PORT, c);
 }
 
+#[derive(Clone, Copy)]
 pub struct BootInfo {
     pub acpi_xsdt_address: *const u8,
     pub map_buffer: *const u8,
@@ -95,6 +101,10 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
 #[unsafe(no_mangle)]
 extern "win64" fn main(boot_info: &BootInfo) {
+    // BootInfo はブートローダのスタック（BootServicesData）上にあり、
+    // その領域をヒープとして再利用すると壊れるので、最初にコピーしておく
+    let boot_info = *boot_info;
+
     serial::init(HV_LOG_PORT);
     *console::CONSOLE.lock() = Some(console::Console::new(hv_putc));
     println!("hello world from hypervisor.");
@@ -139,6 +149,13 @@ extern "win64" fn main(boot_info: &BootInfo) {
 
     for entry in entries {
         if entry.signature == "FADT".as_bytes() {}
+    }
+
+    if let Err(e) = arch::x86_64::vmx::selftest::run() {
+        if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
+            println!("{}", VMX_UNAVAILABLE_MARKER);
+        }
+        panic!("failed to enable VMX: {:?}", e);
     }
 
     println!("{}", BOOT_OK_MARKER);

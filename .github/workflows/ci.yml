@@ -59,4 +59,5 @@ jobs:
         env:
           OVMF_CODE: /usr/share/OVMF/OVMF_CODE_4M.fd
           OVMF_VARS: /usr/share/OVMF/OVMF_VARS_4M.fd
-        run: cargo xtask test
+        # GitHub のランナーでは nested VMX が使えないため、VMX を有効にする手前までを確認する
+        run: cargo xtask test --allow-no-vmx
