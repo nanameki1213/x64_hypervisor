@@ -2,6 +2,8 @@
 
 use core::arch::global_asm;
 
+use spin::Mutex;
+
 use console::println;
 
 use super::ept::Ept;
@@ -180,8 +182,8 @@ impl GuestConfig {
 
 pub struct Vcpu {
     pub regs: GuestRegs,
-    /// TODO(#8): 複数 vCPU で 1 つの VM の EPT を共有する
-    pub ept: Ept,
+    /// VM の EPT。同じ VM の vCPU で共有する
+    pub ept: &'static Mutex<Ept>,
     vmcs: u64,
     launched: bool,
 }
@@ -379,7 +381,7 @@ fn sync_ia32e_mode() {
 
 impl Vcpu {
     /// VMCS を確保してカレントにし、64bit モードのゲストとして初期化する
-    pub fn new(config: &GuestConfig, ept: Ept) -> Self {
+    pub fn new(config: &GuestConfig, ept: &'static Mutex<Ept>) -> Self {
         let vmcs_region = alloc_zeroed_page();
         unsafe {
             *(vmcs_region as *mut u32) = vmcs_revision_id();
@@ -467,7 +469,7 @@ impl Vcpu {
         vmcs::write(field::VM_ENTRY_MSR_LOAD_COUNT, 0);
         vmcs::write(field::VM_ENTRY_INTR_INFO, 0);
         vmcs::write(field::MSR_BITMAP, build_msr_bitmap());
-        vmcs::write(field::EPT_POINTER, self.ept.eptp());
+        vmcs::write(field::EPT_POINTER, self.ept.lock().eptp());
 
         // CR0 / CR4 の VMX で固定されたビットはホストが持ち、ゲストの書き込みを捕捉する。
         // CR4.VMXE はゲストからは 0 に見せる
