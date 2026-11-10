@@ -9,6 +9,7 @@ use super::exit::{self, ExitAction, StopReason};
 use super::vmcs::{self, field};
 use super::{alloc_zeroed_page, guest_fixed_bits, vmcs_revision_id};
 use crate::arch::x86_64::cpu::{self, CR4_VMXE};
+use crate::arch::x86_64::gdt;
 
 /// VMCS に含まれない汎用レジスタ。`vmx_run` / `vmx_exit_entry` のオフセットと一致させること
 #[repr(C)]
@@ -31,13 +32,150 @@ pub struct GuestRegs {
     pub r15: u64,
 }
 
-/// ゲストの初期状態のうち、呼び出し側が決めるもの
+/// セグメントレジスタの状態（VMCS の形式）
+#[derive(Clone, Copy, Debug)]
+pub struct Segment {
+    pub selector: u16,
+    pub base: u64,
+    pub limit: u32,
+    pub access_rights: u32,
+}
+
+impl Segment {
+    pub const UNUSABLE: Segment = Segment {
+        selector: 0,
+        base: 0,
+        limit: 0,
+        access_rights: AR_UNUSABLE,
+    };
+
+    pub const fn flat(selector: u16, access_rights: u32) -> Segment {
+        Segment {
+            selector,
+            base: 0,
+            limit: 0xffff_ffff,
+            access_rights,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DescriptorTable {
+    pub base: u64,
+    pub limit: u16,
+}
+
+/// ゲストの初期状態（汎用レジスタは `Vcpu::regs` で設定する）
+#[derive(Clone, Debug)]
 pub struct GuestConfig {
     pub rip: u64,
     pub rsp: u64,
+    pub rflags: u64,
+    /// ゲストに見せる値。VMX で固定されたビットは実際のレジスタでだけ強制する
+    pub cr0: u64,
     pub cr3: u64,
+    /// ゲストに見せる値。CR4.VMXE は実際のレジスタでだけ立てる
+    pub cr4: u64,
+    pub efer: u64,
+    pub cs: Segment,
+    pub ss: Segment,
+    pub ds: Segment,
+    pub es: Segment,
+    pub fs: Segment,
+    pub gs: Segment,
+    pub tr: Segment,
+    pub ldtr: Segment,
+    pub gdtr: DescriptorTable,
+    pub idtr: DescriptorTable,
     /// HLT で VM exit するか。管理 VM では物理 CPU をそのまま止めたいので false にする
     pub hlt_exiting: bool,
+}
+
+impl GuestConfig {
+    /// HV と同じ GDT / IDT / TSS / ページテーブルを使う 64bit モードのゲスト（セルフテスト用）
+    pub fn mirror_host(rip: u64, rsp: u64, hlt_exiting: bool) -> Self {
+        let gdtr = cpu::sgdt();
+        let idtr = cpu::sidt();
+        let data = Segment::flat(cpu::read_ds(), AR_DATA);
+        GuestConfig {
+            rip,
+            rsp,
+            rflags: RFLAGS_RESERVED,
+            cr0: cpu::read_cr0(),
+            cr3: cpu::read_cr3(),
+            cr4: cpu::read_cr4() & !CR4_VMXE,
+            efer: cpu::rdmsr(cpu::IA32_EFER),
+            cs: Segment::flat(cpu::read_cs(), AR_CODE64),
+            ss: data,
+            ds: data,
+            es: data,
+            fs: Segment::UNUSABLE,
+            gs: Segment::UNUSABLE,
+            tr: Segment {
+                selector: cpu::read_tr(),
+                base: gdt::tss_base(),
+                limit: gdt::tss_limit() as u32,
+                access_rights: AR_TSS64_BUSY,
+            },
+            ldtr: Segment::UNUSABLE,
+            gdtr: DescriptorTable {
+                base: gdtr.base,
+                limit: gdtr.limit,
+            },
+            idtr: DescriptorTable {
+                base: idtr.base,
+                limit: idtr.limit,
+            },
+            hlt_exiting,
+        }
+    }
+
+    /// ページングが有効な 64bit モードのゲスト。割り込みは禁止、IDT は空。
+    /// `gdtr` の `code_selector` / `data_selector` に 64bit コード / データのディスクリプタがあること
+    pub fn long_mode(
+        rip: u64,
+        rsp: u64,
+        cr3: u64,
+        gdtr: DescriptorTable,
+        code_selector: u16,
+        data_selector: u16,
+    ) -> Self {
+        const CR0_PE: u64 = 1 << 0;
+        const CR0_ET: u64 = 1 << 4;
+        const CR0_NE: u64 = 1 << 5;
+        const CR0_PG: u64 = 1 << 31;
+        const CR4_PAE: u64 = 1 << 5;
+        const EFER_LME: u64 = 1 << 8;
+        const EFER_LMA: u64 = 1 << 10;
+
+        let data = Segment::flat(data_selector, AR_DATA);
+        GuestConfig {
+            rip,
+            rsp,
+            rflags: RFLAGS_RESERVED,
+            cr0: CR0_PE | CR0_ET | CR0_NE | CR0_PG,
+            cr3,
+            cr4: CR4_PAE,
+            efer: EFER_LME | EFER_LMA,
+            cs: Segment::flat(code_selector, AR_CODE64),
+            ss: data,
+            ds: data,
+            es: data,
+            fs: data,
+            gs: data,
+            // ゲストは TR を使わないが、VM entry には有効な 64bit TSS が必要
+            tr: Segment {
+                selector: 0,
+                base: 0,
+                limit: 0x67,
+                access_rights: AR_TSS64_BUSY,
+            },
+            ldtr: Segment::UNUSABLE,
+            gdtr,
+            idtr: DescriptorTable { base: 0, limit: 0 },
+            hlt_exiting: false,
+        }
+    }
 }
 
 pub struct Vcpu {
@@ -57,10 +195,12 @@ const CPU_ACTIVATE_SECONDARY: u32 = 1 << 31;
 // secondary processor-based
 const CPU2_ENABLE_EPT: u32 = 1 << 1;
 const CPU2_UNRESTRICTED_GUEST: u32 = 1 << 7;
-// secondary processor-based（対応していれば有効にする。無効だとゲストで #UD になる）
-const CPU2_ENABLE_RDTSCP: u32 = 1 << 3;
-const CPU2_ENABLE_INVPCID: u32 = 1 << 12;
-const CPU2_ENABLE_XSAVES: u32 = 1 << 20;
+// secondary processor-based（対応していれば有効にする。無効だとゲストで #UD になるので、
+// 有効にできなかったものは CPUID でも隠す: exit::handle_cpuid）
+pub(super) const CPU2_ENABLE_RDTSCP: u32 = 1 << 3;
+pub(super) const CPU2_ENABLE_INVPCID: u32 = 1 << 12;
+pub(super) const CPU2_ENABLE_XSAVES: u32 = 1 << 20;
+pub(super) const CPU2_ENABLE_USER_WAIT_PAUSE: u32 = 1 << 26;
 // VM-exit
 const EXIT_HOST_ADDR_SPACE_SIZE: u32 = 1 << 9;
 const EXIT_SAVE_IA32_PAT: u32 = 1 << 18;
@@ -73,10 +213,12 @@ const ENTRY_LOAD_IA32_PAT: u32 = 1 << 14;
 const ENTRY_LOAD_IA32_EFER: u32 = 1 << 15;
 
 // セグメントの access rights（VMCS の形式）
-const AR_CODE64: u64 = 0xa09b; // type=0xb, S, DPL0, P, L, G
-const AR_DATA: u64 = 0xc093; // type=0x3, S, DPL0, P, D/B, G
-const AR_TSS64_BUSY: u64 = 0x008b; // type=0xb, P
-const AR_UNUSABLE: u64 = 1 << 16;
+const AR_CODE64: u32 = 0xa09b; // type=0xb, S, DPL0, P, L, G
+const AR_DATA: u32 = 0xc093; // type=0x3, S, DPL0, P, D/B, G
+const AR_TSS64_BUSY: u32 = 0x008b; // type=0xb, P
+const AR_UNUSABLE: u32 = 1 << 16;
+
+const RFLAGS_RESERVED: u64 = 1 << 1;
 
 unsafe extern "C" {
     /// ゲストを実行し、VM exit したら戻る。VMLAUNCH / VMRESUME 自体が失敗したら 1 を返す
@@ -254,6 +396,7 @@ impl Vcpu {
         vcpu.setup_controls(config);
         vcpu.setup_host_state();
         vcpu.setup_guest_state(config);
+        sync_ia32e_mode();
         vcpu
     }
 
@@ -289,7 +432,10 @@ impl Vcpu {
             cpu::IA32_VMX_PROCBASED_CTLS2,
             // unrestricted guest は AP をリアルモードから起動するのに必要（#8）
             CPU2_ENABLE_EPT | CPU2_UNRESTRICTED_GUEST,
-            CPU2_ENABLE_RDTSCP | CPU2_ENABLE_INVPCID | CPU2_ENABLE_XSAVES,
+            CPU2_ENABLE_RDTSCP
+                | CPU2_ENABLE_INVPCID
+                | CPU2_ENABLE_XSAVES
+                | CPU2_ENABLE_USER_WAIT_PAUSE,
         );
         let exit = adjust_controls(
             "VM-exit",
@@ -356,7 +502,7 @@ impl Vcpu {
 
         vmcs::write(field::HOST_FS_BASE, cpu::rdmsr(cpu::IA32_FS_BASE));
         vmcs::write(field::HOST_GS_BASE, cpu::rdmsr(cpu::IA32_GS_BASE));
-        vmcs::write(field::HOST_TR_BASE, crate::arch::x86_64::gdt::tss_base());
+        vmcs::write(field::HOST_TR_BASE, gdt::tss_base());
         vmcs::write(field::HOST_GDTR_BASE, gdtr.base);
         vmcs::write(field::HOST_IDTR_BASE, idtr.base);
 
@@ -379,89 +525,92 @@ impl Vcpu {
         vmcs::write(field::HOST_RIP, vmx_exit_entry as *const () as u64);
     }
 
-    /// HV と同じ GDT / IDT / TSS / ページテーブルを使う 64bit モードのゲストにする。
-    ///
-    /// TODO(#6): 管理 VM（Linux）用には、ゲスト専用の GDT とページテーブルを用意する
     fn setup_guest_state(&self, config: &GuestConfig) {
-        let gdtr = cpu::sgdt();
-        let idtr = cpu::sidt();
-        let cr0 = cpu::read_cr0();
-        let cr4 = cpu::read_cr4();
-
-        vmcs::write(field::GUEST_CR0, cr0);
-        vmcs::write(field::CR0_READ_SHADOW, cr0);
+        let fixed = guest_fixed_bits();
+        vmcs::write(
+            field::GUEST_CR0,
+            (config.cr0 | fixed.cr0_fixed1) & fixed.cr0_allowed,
+        );
+        vmcs::write(field::CR0_READ_SHADOW, config.cr0);
         vmcs::write(field::GUEST_CR3, config.cr3);
-        vmcs::write(field::GUEST_CR4, cr4);
-        vmcs::write(field::CR4_READ_SHADOW, cr4 & !CR4_VMXE);
+        vmcs::write(
+            field::GUEST_CR4,
+            (config.cr4 | fixed.cr4_fixed1 | CR4_VMXE) & fixed.cr4_allowed,
+        );
+        vmcs::write(field::CR4_READ_SHADOW, config.cr4 & !CR4_VMXE);
         vmcs::write(field::GUEST_DR7, 0x400);
 
-        let code = cpu::read_cs() as u64;
-        let data = cpu::read_ds() as u64;
-        vmcs::write(field::GUEST_CS_SELECTOR, code);
-        vmcs::write(field::GUEST_CS_BASE, 0);
-        vmcs::write(field::GUEST_CS_LIMIT, 0xffff_ffff);
-        vmcs::write(field::GUEST_CS_AR_BYTES, AR_CODE64);
-        for (sel, base, limit, ar) in [
+        for (segment, selector, base, limit, ar) in [
             (
+                &config.cs,
+                field::GUEST_CS_SELECTOR,
+                field::GUEST_CS_BASE,
+                field::GUEST_CS_LIMIT,
+                field::GUEST_CS_AR_BYTES,
+            ),
+            (
+                &config.ss,
                 field::GUEST_SS_SELECTOR,
                 field::GUEST_SS_BASE,
                 field::GUEST_SS_LIMIT,
                 field::GUEST_SS_AR_BYTES,
             ),
             (
+                &config.ds,
                 field::GUEST_DS_SELECTOR,
                 field::GUEST_DS_BASE,
                 field::GUEST_DS_LIMIT,
                 field::GUEST_DS_AR_BYTES,
             ),
             (
+                &config.es,
                 field::GUEST_ES_SELECTOR,
                 field::GUEST_ES_BASE,
                 field::GUEST_ES_LIMIT,
                 field::GUEST_ES_AR_BYTES,
             ),
-        ] {
-            vmcs::write(sel, data);
-            vmcs::write(base, 0);
-            vmcs::write(limit, 0xffff_ffff);
-            vmcs::write(ar, AR_DATA);
-        }
-        for (sel, base, limit, ar) in [
             (
+                &config.fs,
                 field::GUEST_FS_SELECTOR,
                 field::GUEST_FS_BASE,
                 field::GUEST_FS_LIMIT,
                 field::GUEST_FS_AR_BYTES,
             ),
             (
+                &config.gs,
                 field::GUEST_GS_SELECTOR,
                 field::GUEST_GS_BASE,
                 field::GUEST_GS_LIMIT,
                 field::GUEST_GS_AR_BYTES,
             ),
             (
+                &config.tr,
+                field::GUEST_TR_SELECTOR,
+                field::GUEST_TR_BASE,
+                field::GUEST_TR_LIMIT,
+                field::GUEST_TR_AR_BYTES,
+            ),
+            (
+                &config.ldtr,
                 field::GUEST_LDTR_SELECTOR,
                 field::GUEST_LDTR_BASE,
                 field::GUEST_LDTR_LIMIT,
                 field::GUEST_LDTR_AR_BYTES,
             ),
         ] {
-            vmcs::write(sel, 0);
-            vmcs::write(base, 0);
-            vmcs::write(limit, 0);
-            vmcs::write(ar, AR_UNUSABLE);
+            vmcs::write(selector, segment.selector as u64);
+            vmcs::write(base, segment.base);
+            vmcs::write(limit, segment.limit as u64);
+            vmcs::write(ar, segment.access_rights as u64);
         }
-        vmcs::write(field::GUEST_TR_SELECTOR, cpu::read_tr() as u64);
-        vmcs::write(field::GUEST_TR_BASE, crate::arch::x86_64::gdt::tss_base());
-        vmcs::write(field::GUEST_TR_LIMIT, crate::arch::x86_64::gdt::tss_limit());
-        vmcs::write(field::GUEST_TR_AR_BYTES, AR_TSS64_BUSY);
 
-        vmcs::write(field::GUEST_GDTR_BASE, gdtr.base);
-        vmcs::write(field::GUEST_GDTR_LIMIT, gdtr.limit as u64);
-        vmcs::write(field::GUEST_IDTR_BASE, idtr.base);
-        vmcs::write(field::GUEST_IDTR_LIMIT, idtr.limit as u64);
+        vmcs::write(field::GUEST_GDTR_BASE, config.gdtr.base);
+        vmcs::write(field::GUEST_GDTR_LIMIT, config.gdtr.limit as u64);
+        vmcs::write(field::GUEST_IDTR_BASE, config.idtr.base);
+        vmcs::write(field::GUEST_IDTR_LIMIT, config.idtr.limit as u64);
 
-        vmcs::write(field::GUEST_IA32_EFER, cpu::rdmsr(cpu::IA32_EFER));
+        vmcs::write(field::GUEST_IA32_EFER, config.efer);
+        // ゲストが自分で設定するまでは、ファームウェアが設定した PAT をそのまま使わせる
         vmcs::write(field::GUEST_IA32_PAT, cpu::rdmsr(cpu::IA32_PAT));
         vmcs::write(field::GUEST_IA32_DEBUGCTL, 0);
         vmcs::write(field::GUEST_SYSENTER_CS, 0);
@@ -470,7 +619,7 @@ impl Vcpu {
 
         vmcs::write(field::GUEST_RIP, config.rip);
         vmcs::write(field::GUEST_RSP, config.rsp);
-        vmcs::write(field::GUEST_RFLAGS, 0x2);
+        vmcs::write(field::GUEST_RFLAGS, config.rflags);
         vmcs::write(field::GUEST_ACTIVITY_STATE, 0);
         vmcs::write(field::GUEST_INTERRUPTIBILITY_INFO, 0);
         vmcs::write(field::GUEST_PENDING_DBG_EXCEPTIONS, 0);

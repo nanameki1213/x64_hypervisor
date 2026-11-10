@@ -34,3 +34,4 @@ OVMF_VARS.fd
 trace.log
 hypervisor.log
 guest.log
+/build

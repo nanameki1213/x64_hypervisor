@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 acpi = { version = "0.1.0", path = "../support/acpi" }
+boot_info = { version = "0.1.0", path = "../support/boot_info" }
 allocator = { version = "0.1.0", path = "../support/allocator" }
 console = { version = "0.1.0", path = "../support/console" }
 serial = { version = "0.1.0", path = "../support/serial" }

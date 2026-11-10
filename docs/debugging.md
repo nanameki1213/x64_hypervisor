@@ -4,6 +4,7 @@
 
 ```sh
 cargo xtask build
+cargo xtask linux          # 管理 VM のカーネルと initramfs（任意。docs/linux-boot.md）
 cargo xtask run            # 対話モード
 cargo xtask test           # headless の起動テスト（CI と同じ）
 ```
@@ -24,7 +25,7 @@ cargo xtask test           # headless の起動テスト（CI と同じ）
 
 | ポート | 用途 | `run` | `test` |
 |---|---|---|---|
-| COM1 (0x3f8) | 管理 VM（Linux）のコンソール | 端末（QEMU モニタと多重化。`Ctrl-a c` で切り替え） | `guest.log` |
+| COM1 (0x3f8) | 管理 VM（Linux）のコンソール（cmdline で I/O アドレスを指定している。docs/linux-boot.md） | 端末（QEMU モニタと多重化。`Ctrl-a c` で切り替え） | `guest.log` |
 | COM2 (0x2f8) | HV のログ | `hypervisor.log`（端末にも `[hv]` を付けて表示） | `hypervisor.log` |
 | debugcon (0x402) | OVMF のデバッグログ | `debug.log` | `debug.log` |
 
@@ -36,11 +37,14 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
   - 管理 VM 用の EPT で HV のメモリがマップされておらず、それ以外が恒等マップされていること
   - 最小のテストゲストで CPUID / VMCALL / CR4 / XSETBV の exit 処理、EPT の遅延マップ、HV のヒープへのアクセスが EPT violation で止められること（このときゲスト状態のダンプが出るが、想定どおりの動作）
 - HV のログに `[hypervisor] boot ok` が出れば成功
-- `[PANIC]` か `[EXCEPTION]` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
+- ESP に管理 VM のカーネル（`esp/bzImage`、`cargo xtask linux` が置く）があれば、さらに次を確認する
+  - 管理 VM のコンソール（`guest.log`）に `[guest] initramfs ok`（`linux/init` が出す）が出ること
+  - 管理 VM から見た e820 で、HV のメモリ（HV のログの `[mm]` 行の image / heap）が usable になっていないこと
+- `[PANIC]` か `[EXCEPTION]`、`[hypervisor] management VM stopped`（管理 VM が止まった）、管理 VM の `Kernel panic` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
 - `--allow-no-vmx`: CPU が VMX に対応していない場合、HV が `[hypervisor] VMX is not available on this CPU` を出した時点で成功とする
   - GitHub Actions のランナーは KVM は使えるが nested VMX は使えないため、CI ではこれを付けて VMX の手前までを確認している
   - **VMX 以降の動作は CI では確認されない**。VMX に関わる変更は、nested KVM が使える環境で `cargo xtask test`（`--allow-no-vmx` なし）を実行して確認すること
-- 管理 VM が起動するようになったら、判定条件を Linux のプロンプトに変更する（#6）
+- CI のランナーでは管理 VM のカーネルをビルドしない（ESP に `bzImage` がない）ので、HV のセルフテストの手前までの確認になる
 
 ### OVMF
 

@@ -3,6 +3,7 @@
 //! HV が持つ物理メモリは HV のイメージと固定サイズのヒープだけで、残りはすべて管理 VM に渡す。
 //! 詳細は docs/memory.md を参照。
 
+use alloc::vec::Vec;
 use core::ops::Range;
 
 /// HV のヒープのサイズ。VMCS や EPT のページテーブルなど、HV の動的な確保はすべてここから行う
@@ -27,7 +28,8 @@ pub struct EfiMemoryDescriptor {
 }
 
 #[allow(dead_code)]
-#[repr(C)]
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EfiMemoryType {
     ReservedMemoryType,
     LoaderCode,
@@ -45,6 +47,109 @@ pub enum EfiMemoryType {
     PalCode,
     PersistentMemory,
     MaxMemoryType,
+}
+
+impl EfiMemoryDescriptor {
+    pub fn range(&self) -> Range<u64> {
+        self.physical_start..self.physical_start + self.number_of_pages * PAGE_SIZE_4K
+    }
+
+    pub fn is_type(&self, t: EfiMemoryType) -> bool {
+        self.memory_type == t as u32
+    }
+
+    /// `ExitBootServices` の後に自由に使えるメモリか
+    pub fn is_free_after_exit_boot_services(&self) -> bool {
+        self.is_type(EfiMemoryType::ConventionalMemory)
+            || self.is_type(EfiMemoryType::BootServicesCode)
+            || self.is_type(EfiMemoryType::BootServicesData)
+    }
+}
+
+/// ブートローダから受け取った UEFI のメモリマップ（LoaderData にある）
+#[derive(Clone, Copy)]
+pub struct EfiMemoryMap {
+    buffer: *const u8,
+    size: usize,
+    descriptor_size: usize,
+}
+
+impl EfiMemoryMap {
+    /// # Safety
+    /// `buffer` は `size` バイトの UEFI メモリマップを指し、以後上書きされないこと
+    pub unsafe fn new(buffer: *const u8, size: usize, descriptor_size: usize) -> Self {
+        EfiMemoryMap {
+            buffer,
+            size,
+            descriptor_size,
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &'static EfiMemoryDescriptor> + '_ {
+        (0..self.size / self.descriptor_size).map(|i| unsafe {
+            &*(self.buffer.add(i * self.descriptor_size) as *const EfiMemoryDescriptor)
+        })
+    }
+}
+
+/// 重ならない物理アドレスの範囲の集合（昇順）
+#[derive(Clone, Debug, Default)]
+pub struct RangeSet {
+    ranges: Vec<Range<u64>>,
+}
+
+impl RangeSet {
+    pub fn add(&mut self, range: Range<u64>) {
+        if range.is_empty() {
+            return;
+        }
+        let mut merged = range;
+        self.ranges.retain(|r| {
+            // 重なるか接する範囲は 1 つにまとめる
+            if r.start <= merged.end && merged.start <= r.end {
+                merged = merged.start.min(r.start)..merged.end.max(r.end);
+                false
+            } else {
+                true
+            }
+        });
+        let pos = self.ranges.partition_point(|r| r.start < merged.start);
+        self.ranges.insert(pos, merged);
+    }
+
+    pub fn remove(&mut self, range: &Range<u64>) {
+        let mut result = Vec::with_capacity(self.ranges.len() + 1);
+        for r in self.ranges.drain(..) {
+            if r.end <= range.start || range.end <= r.start {
+                result.push(r);
+                continue;
+            }
+            if r.start < range.start {
+                result.push(r.start..range.start);
+            }
+            if range.end < r.end {
+                result.push(range.end..r.end);
+            }
+        }
+        self.ranges = result;
+    }
+
+    pub fn contains_range(&self, range: &Range<u64>) -> bool {
+        self.ranges
+            .iter()
+            .any(|r| r.start <= range.start && range.end <= r.end)
+    }
+
+    /// `[min, max)` に収まる `align` アラインの `size` バイトを、もっとも低いアドレスから取り出す
+    pub fn take(&mut self, size: u64, align: u64, min: u64, max: u64) -> Option<Range<u64>> {
+        let found = self.ranges.iter().find_map(|r| {
+            let start = align_up(r.start.max(min), align);
+            let end = start.checked_add(size)?;
+            (end <= r.end && end <= max).then_some(start..end)
+        })?;
+        self.remove(&found);
+        Some(found)
+    }
 }
 
 /// HV が使う物理メモリの配置
@@ -93,21 +198,16 @@ fn image_range() -> Range<u64> {
 /// 管理 VM の低位メモリ（リアルモードのトランポリンなど）と競合しないよう、
 /// ConventionalMemory のうちもっとも高位で、直接マップの範囲に収まる 2MiB アラインの領域を選ぶ。
 /// 2MiB アラインにしておくと、管理 VM の EPT で周囲を大きいページのままマップできる。
-///
-/// # Safety
-/// `map_buffer` は `map_size` バイトの UEFI メモリマップを指していること
-pub unsafe fn init(map_buffer: *const u8, map_size: usize, descriptor_size: usize) -> MemoryLayout {
+pub fn init(memory_map: &EfiMemoryMap) -> MemoryLayout {
     let image = image_range();
     let mut heap: Option<Range<u64>> = None;
     let mut memory_map_top = 0;
 
-    for i in 0..map_size / descriptor_size {
-        let desc = unsafe { &*(map_buffer.add(i * descriptor_size) as *const EfiMemoryDescriptor) };
-        let start = desc.physical_start;
-        let end = start + desc.number_of_pages * PAGE_SIZE_4K;
+    for desc in memory_map.iter() {
+        let Range { start, end } = desc.range();
         memory_map_top = memory_map_top.max(end);
 
-        if desc.memory_type != EfiMemoryType::ConventionalMemory as u32 {
+        if !desc.is_type(EfiMemoryType::ConventionalMemory) {
             continue;
         }
         let candidate_end = align_down(end.min(DIRECT_MAP_END), PAGE_SIZE_2M);
@@ -120,6 +220,25 @@ pub unsafe fn init(map_buffer: *const u8, map_size: usize, descriptor_size: usiz
         if heap.as_ref().is_none_or(|h| candidate_start > h.start) {
             heap = Some(candidate_start..candidate_end);
         }
+    }
+
+    // HV のイメージは 2MiB 単位で管理 VM から隠すので、切り上げた部分まで
+    // ブートローダが確保した（LoaderCode）領域でなければならない。
+    // まだヒープがないので、メモリ確保をせずに先頭から順にたどる
+    let mut covered = image.start;
+    while covered < image.end {
+        let Some(next) = memory_map
+            .iter()
+            .filter(|d| d.is_type(EfiMemoryType::LoaderCode))
+            .map(|d| d.range())
+            .find(|r| r.contains(&covered))
+        else {
+            panic!(
+                "HV image {:#x}-{:#x} (rounded up to 2MiB) is not entirely allocated as LoaderCode (gap at {:#x})",
+                image.start, image.end, covered
+            );
+        };
+        covered = next.end;
     }
 
     let heap = heap.unwrap_or_else(|| {

@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod linux;
+
 type DynError = Box<dyn std::error::Error>;
 
 fn main() {
@@ -24,6 +26,7 @@ fn try_main() -> Result<(), DynError> {
     let task = env::args().nth(1);
     match task.as_deref() {
         Some("build") => build()?,
+        Some("linux") => linux::build()?,
         Some("run") => run()?,
         Some("test") => test()?,
         Some("help") | Some("-h") | Some("--help") => print_help(),
@@ -101,9 +104,19 @@ const GUEST_LOG: &str = "guest.log";
 const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
 /// CPU が VMX に対応していないときに HV が出す文字列（hypervisor/src/main.rs の VMX_UNAVAILABLE_MARKER と一致させる）
 const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
-/// 起動テストを即座に失敗させる文字列
-const FAILURE_MARKERS: [&str; 2] = ["[PANIC]", "[EXCEPTION]"];
+/// 起動テストを即座に失敗させる HV のログの文字列（GUEST_STOPPED_MARKER は hypervisor/src/main.rs と一致させる）
+const FAILURE_MARKERS: [&str; 3] = [
+    "[PANIC]",
+    "[EXCEPTION]",
+    "[hypervisor] management VM stopped",
+];
+/// 管理 VM の initramfs が起動したときに出す文字列（linux/init と一致させる）
+const GUEST_OK_MARKER: &str = "[guest] initramfs ok";
+/// 起動テストを即座に失敗させる管理 VM のコンソールの文字列
+const GUEST_FAILURE_MARKERS: [&str; 1] = ["Kernel panic"];
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 60;
+/// ゲストのメモリ。HV のヒープ（32MiB）と管理 VM の両方が収まるようにする
+const QEMU_MEMORY: &str = "1G";
 
 #[derive(Default)]
 struct QemuOptions {
@@ -201,6 +214,7 @@ fn qemu_command(opts: &QemuOptions) -> Result<Command, DynError> {
     })?;
     // 前回の実行のログが成功判定に混ざらないよう消しておく
     let _ = fs::remove_file(project_root().join(HV_LOG));
+    let _ = fs::remove_file(project_root().join(GUEST_LOG));
 
     let mut qemu_command = Command::new("qemu-system-x86_64");
     qemu_command.current_dir(project_root());
@@ -211,7 +225,7 @@ fn qemu_command(opts: &QemuOptions) -> Result<Command, DynError> {
         qemu_command.args(["-cpu", "max"]);
     }
     // intel-iommu を使うため q35 にする
-    qemu_command.args(["-machine", "q35"]);
+    qemu_command.args(["-machine", "q35", "-m", QEMU_MEMORY]);
     if let Some(n) = opts.smp {
         qemu_command.args(["-smp", &n.to_string()]);
     }
@@ -322,7 +336,8 @@ fn follow_hv_log(done: &AtomicBool) {
     }
 }
 
-/// headless で起動し、HV のログに BOOT_OK_MARKER が出れば成功とする
+/// headless で起動し、HV のログに BOOT_OK_MARKER が出れば成功とする。
+/// ESP に管理 VM のカーネルがあれば、さらに管理 VM のコンソールに GUEST_OK_MARKER が出るまで待つ
 fn test() -> Result<(), DynError> {
     let args: Vec<String> = env::args().skip(2).collect();
     let (opts, rest) = QemuOptions::parse(&args)?;
@@ -361,22 +376,36 @@ fn test() -> Result<(), DynError> {
         .stderr(Stdio::inherit())
         .spawn()?;
 
+    let expect_guest = project_root().join("esp").join(linux::ESP_KERNEL).exists();
+    if expect_guest {
+        eprintln!(
+            "esp/{} があるので、管理 VM のシェルの起動まで確認します",
+            linux::ESP_KERNEL
+        );
+    }
+
     let hv_log = project_root().join(HV_LOG);
+    let guest_log = project_root().join(GUEST_LOG);
     let start = Instant::now();
     let result = loop {
         let log = fs::read_to_string(&hv_log).unwrap_or_default();
-        if log.contains(BOOT_OK_MARKER) {
-            break Ok(());
+        let guest = String::from_utf8_lossy(&fs::read(&guest_log).unwrap_or_default()).into_owned();
+        // Ok の値は、管理 VM の起動まで確認したかどうか
+        if log.contains(BOOT_OK_MARKER) && (!expect_guest || guest.contains(GUEST_OK_MARKER)) {
+            break Ok(expect_guest);
         }
         // HV はこの文字列を出した直後に panic するので、失敗判定より先に見る
         if allow_no_vmx && log.contains(VMX_UNAVAILABLE_MARKER) {
             eprintln!(
                 "warning: VMX が使えないため、VMX を有効にする手前までを確認して成功とします"
             );
-            break Ok(());
+            break Ok(false);
         }
         if let Some(marker) = FAILURE_MARKERS.iter().find(|m| log.contains(*m)) {
             break Err(format!("HV reported {}", marker));
+        }
+        if let Some(marker) = GUEST_FAILURE_MARKERS.iter().find(|m| guest.contains(*m)) {
+            break Err(format!("management VM reported {}", marker));
         }
         if let Some(status) = child.try_wait()? {
             break Err(format!("QEMU exited before boot completed ({})", status));
@@ -392,7 +421,23 @@ fn test() -> Result<(), DynError> {
 
     eprintln!("---- {} ----", HV_LOG);
     eprint!("{}", fs::read_to_string(&hv_log).unwrap_or_default());
+    if expect_guest {
+        eprintln!("---- {} ----", GUEST_LOG);
+        eprint!(
+            "{}",
+            String::from_utf8_lossy(&fs::read(&guest_log).unwrap_or_default())
+        );
+    }
     eprintln!("------------------------");
+
+    let result = result.and_then(|guest_booted| {
+        if !guest_booted {
+            return Ok(());
+        }
+        let log = fs::read_to_string(&hv_log).unwrap_or_default();
+        let guest = String::from_utf8_lossy(&fs::read(&guest_log).unwrap_or_default()).into_owned();
+        check_hv_memory_hidden(&log, &guest)
+    });
 
     match result {
         Ok(()) => {
@@ -401,6 +446,67 @@ fn test() -> Result<(), DynError> {
         }
         Err(e) => Err(format!("boot test failed: {}", e).into()),
     }
+}
+
+/// 管理 VM から見た e820 の usable な範囲が、HV のメモリ（HV のログの `[mm]` 行）と重ならないことを確かめる
+fn check_hv_memory_hidden(hv_log: &str, guest_log: &str) -> Result<(), String> {
+    let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+    // [mm] image 0x...-0x..., heap 0x...-0x..., memory map top 0x...
+    let mm = hv_log
+        .lines()
+        .find_map(|l| l.strip_prefix("[mm] "))
+        .ok_or("HV log has no [mm] line")?;
+    let mut hidden = Vec::new();
+    for part in mm.split(", ") {
+        if let Some((name, range)) = part.split_once(' ')
+            && (name == "image" || name == "heap")
+            && let Some((start, end)) = range.split_once('-')
+        {
+            hidden.push((
+                name,
+                hex(start).ok_or("bad [mm] line")?,
+                hex(end).ok_or("bad [mm] line")?,
+            ));
+        }
+    }
+    if hidden.len() != 2 {
+        return Err(format!("unexpected [mm] line: {}", mm));
+    }
+
+    // [    0.000000] BIOS-e820: [mem 0x...-0x...] usable（終端を含む）
+    let mut usable = 0;
+    for line in guest_log.lines() {
+        let Some(rest) = line.split("BIOS-e820: [mem ").nth(1) else {
+            continue;
+        };
+        let Some((range, kind)) = rest.split_once("] ") else {
+            continue;
+        };
+        if kind.trim() != "usable" {
+            continue;
+        }
+        let (start, last) = range.split_once('-').ok_or("bad e820 line")?;
+        let (start, end) = (
+            hex(start).ok_or("bad e820 line")?,
+            hex(last).ok_or("bad e820 line")? + 1,
+        );
+        usable += 1;
+        for (name, hs, he) in &hidden {
+            if start < *he && *hs < end {
+                return Err(format!(
+                    "the management VM sees HV {} {:#x}-{:#x} as usable memory ({:#x}-{:#x})",
+                    name, hs, he, start, end
+                ));
+            }
+        }
+    }
+    if usable == 0 {
+        return Err("no usable e820 entry in the management VM's log".into());
+    }
+    eprintln!(
+        "HV のメモリ（image / heap）が管理 VM の e820 で usable になっていないことを確認しました"
+    );
+    Ok(())
 }
 
 fn project_root() -> PathBuf {
@@ -416,10 +522,13 @@ fn print_help() {
         "Usage: cargo xtask <command>
 
 Commands:
-  build              ブートローダーとカーネルをビルドして esp/ に配置する
+  build              ブートローダーと HV をビルドして esp/ に配置する
+  linux              管理 VM の Linux カーネルと initramfs をビルドして esp/ に配置する
+                     （初回はソースの取得とビルドに数分かかる。linux/ の設定を使う）
   run [OPTION]       QEMU でブートローダーを起動する
                      COM1（管理 VM）は端末に、COM2（HV）は {hv_log} に出力し、端末にも [hv] 付きで表示する
   test [OPTION]      QEMU を headless で起動し、HV の起動完了を確認する（CI 用）
+                     esp/bzImage があれば、管理 VM の initramfs のシェルが起動するまで確認する
   help               このヘルプを表示する
 
 Common Options (run / test):
@@ -437,7 +546,9 @@ test Options:
   --allow-no-vmx     VMX が使えない環境では、HV が VMX を有効にする手前まで起動すれば成功とする（CI 用）
 
 Environment:
-  OVMF_CODE / OVMF_VARS  OVMF のパスを上書きする（デフォルトは edk2 のビルド成果物）",
+  OVMF_CODE / OVMF_VARS  OVMF のパスを上書きする（デフォルトは edk2 のビルド成果物）
+  XTASK_LINUX_DIR        linux のソースの展開先とビルドディレクトリ（デフォルトは build/linux）
+  BUSYBOX                initramfs に入れる静的リンクの busybox（デフォルトは PATH から探す）",
         hv_log = HV_LOG,
         timeout = DEFAULT_TEST_TIMEOUT_SECS,
     );
