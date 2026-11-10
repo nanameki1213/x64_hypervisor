@@ -3,9 +3,12 @@
 //! 管理 VM はゲスト物理アドレス = ホスト物理アドレスの恒等マップで動かし、
 //! HV が使う物理メモリ（holes）だけをマップしない。
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::ops::Range;
+
+use spin::Mutex;
 
 use super::alloc_zeroed_page;
 use crate::arch::x86_64::cpu;
@@ -43,7 +46,7 @@ pub enum ViolationError {
     /// HV が使う物理メモリへのアクセス
     HvMemory,
     /// マップ済みのページへのアクセス（権限違反）。今は権限を絞ったマップを作らないので起きないはず
-    AlreadyMapped,
+    PermissionViolation,
 }
 
 /// マップの統計（デバッグ用）
@@ -189,18 +192,29 @@ impl Ept {
 
     /// EPT violation の処理。HV のメモリ以外なら、そのアドレスを含む 1GiB を恒等マップする
     /// （64bit BAR など、起動時にマップしなかった高位の MMIO へのアクセスで起きる）
-    pub fn handle_violation(&mut self, gpa: u64) -> Result<(), ViolationError> {
+    ///
+    /// `was_present` は exit qualification が示す、violation の時点でエントリが存在したかどうか。
+    /// 存在しなかったのに今はマップされていれば、別の vCPU が先にマップしたので何もしない
+    pub fn handle_violation(&mut self, gpa: u64, was_present: bool) -> Result<(), ViolationError> {
         if self.holes.iter().any(|h| h.contains(&gpa)) {
             return Err(ViolationError::HvMemory);
         }
+        if was_present {
+            return Err(ViolationError::PermissionViolation);
+        }
         if self.translate(gpa).is_some() {
-            return Err(ViolationError::AlreadyMapped);
+            return Ok(());
         }
         let start = align_down(gpa, PAGE_SIZE_1G);
         self.map_identity(start..start + PAGE_SIZE_1G);
         // 存在しないエントリは TLB にキャッシュされないが、念のため無効化しておく
         invept(self.eptp());
         Ok(())
+    }
+
+    /// 複数の vCPU で共有できるようにする（VM が生きている間は解放しない）
+    pub fn into_shared(self) -> &'static Mutex<Ept> {
+        Box::leak(Box::new(Mutex::new(self)))
     }
 
     pub fn stats(&self) -> EptStats {

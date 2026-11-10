@@ -180,7 +180,7 @@ pub fn run(layout: &MemoryLayout) {
         (&raw const GUEST_STACK) as u64 + GUEST_STACK_SIZE as u64,
         true,
     );
-    let mut vcpu = Vcpu::new(&config, ept);
+    let mut vcpu = Vcpu::new(&config, ept.into_shared());
     vcpu.regs.r13 = lazy_gpa;
     vcpu.regs.r14 = layout.heap.start;
     let reason = vcpu.run();
@@ -195,6 +195,6 @@ pub fn run(layout: &MemoryLayout) {
             reason, expected, checks, ALL_CHECKS
         );
     }
-    assert_eq!(vcpu.ept.translate(lazy_gpa), Some(lazy_gpa));
+    assert_eq!(vcpu.ept.lock().translate(lazy_gpa), Some(lazy_gpa));
     println!("[vmx] self test passed (checks={:#x})", checks);
 }
