@@ -205,11 +205,17 @@ pub fn init() {
             };
             (*idt)[vector] = IdtEntry::new(stub, ist);
         }
+    }
+    load();
+}
 
-        let ptr = IdtPointer {
-            limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
-            base: idt as u64,
-        };
+/// `init` で作った IDT を現在の CPU に読み込む（IDT はすべての CPU で共有する）
+pub fn load() {
+    let ptr = IdtPointer {
+        limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,
+        base: (&raw const IDT) as u64,
+    };
+    unsafe {
         asm!("lidt [{}]", in(reg) &ptr, options(readonly, nostack, preserves_flags));
     }
 }

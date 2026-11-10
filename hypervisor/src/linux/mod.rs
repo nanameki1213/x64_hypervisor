@@ -15,7 +15,9 @@ use console::println;
 use crate::arch::x86_64::vmx::StopReason;
 use crate::arch::x86_64::vmx::ept;
 use crate::arch::x86_64::vmx::vcpu::{DescriptorTable, GuestConfig, Vcpu};
-use crate::mm::{EfiMemoryMap, MemoryLayout, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K, RangeSet};
+use crate::mm::{
+    self, EfiMemoryMap, MemoryLayout, PAGE_SIZE_1G, PAGE_SIZE_2M, PAGE_SIZE_4K, RangeSet,
+};
 
 /// setup header（bzImage と boot_params で同じオフセット）
 mod hdr {
@@ -229,16 +231,7 @@ pub fn prepare(
 
     // ExitBootServices の後に空いているメモリから、HV のメモリを除いたもの。
     // bzImage / initrd / cmdline はブートローダが LoaderData に置いたので、ここには含まれない
-    let mut free = RangeSet::default();
-    for d in memory_map
-        .iter()
-        .filter(|d| d.is_free_after_exit_boot_services())
-    {
-        free.add(d.range());
-    }
-    for r in layout.reserved() {
-        free.remove(&r);
-    }
+    let mut free = mm::free_memory(memory_map, layout);
 
     let kernel = place_kernel(&header, &mut free)?;
     let boot_data_range = free

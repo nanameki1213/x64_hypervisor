@@ -107,9 +107,31 @@ pub struct Fadt {
 }
 
 impl AcpiTable for Fadt {
-    const SIGNATURE: &'static str = "FADT";
+    const SIGNATURE: &'static str = "FACP";
     fn header(&self) -> &AcpiTableHeader {
         &self.header
+    }
+}
+
+impl Fadt {
+    fn read_u32(&self, offset: usize) -> Option<u32> {
+        if offset + 4 > self.header.length as usize {
+            return None;
+        }
+        let base = self as *const Fadt as *const u8;
+        Some(unsafe { core::ptr::read_unaligned(base.add(offset) as *const u32) })
+    }
+
+    /// ACPI PM タイマ（3.579545MHz）の I/O ポートと、カウンタが 32 ビットかどうか。なければ None
+    pub fn pm_timer(&self) -> Option<(u16, bool)> {
+        const PM_TMR_BLK: usize = 76;
+        const FLAGS: usize = 112;
+        const TMR_VAL_EXT: u32 = 1 << 8;
+        let port = self
+            .read_u32(PM_TMR_BLK)
+            .filter(|&p| p != 0 && p <= 0xffff)?;
+        let ext = self.read_u32(FLAGS).is_some_and(|f| f & TMR_VAL_EXT != 0);
+        Some((port as u16, ext))
     }
 }
 
