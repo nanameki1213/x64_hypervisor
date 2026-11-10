@@ -152,6 +152,22 @@ impl RangeSet {
     }
 }
 
+/// `ExitBootServices` の後に空いているメモリから、HV のメモリを除いたもの。
+/// ブートローダが LoaderData に置いたファイル（bzImage など）は含まれない
+pub fn free_memory(memory_map: &EfiMemoryMap, layout: &MemoryLayout) -> RangeSet {
+    let mut free = RangeSet::default();
+    for d in memory_map
+        .iter()
+        .filter(|d| d.is_free_after_exit_boot_services())
+    {
+        free.add(d.range());
+    }
+    for r in layout.reserved() {
+        free.remove(&r);
+    }
+    free
+}
+
 /// HV が使う物理メモリの配置
 #[derive(Clone, Debug)]
 pub struct MemoryLayout {

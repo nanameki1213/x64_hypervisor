@@ -114,6 +114,8 @@ extern "win64" fn main(boot_info: &BootInfo) {
         cpus.apic_ids,
         cpus.bsp_apic_id
     );
+    let online = unsafe { arch::x86_64::smp::start_aps(&cpus, xsdt, &memory_map, &layout) };
+    println!("[smp] {} of {} APs online", online, cpus.apic_ids.len() - 1);
 
     if let Err(e) = arch::x86_64::vmx::enable() {
         if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
