@@ -59,7 +59,9 @@ pub fn load_elf(base_address: *const u64, bs: &BootServices) -> u64 {
         if min_lma > max_lma {
             panic!("no PT_LOAD segment found");
         }
-        let total_size = (max_lma - min_lma) as usize;
+        // HV は自分のイメージを 2MiB 単位で管理 VM から隠すので、末尾も 2MiB 単位で確保しておく。
+        // そうしないと、切り上げた部分に UEFI が別のデータ（initrd など）を置くことがある
+        let total_size = ((max_lma - min_lma) as usize).next_multiple_of(KERNEL_ALIGN);
 
         let load_address = match allocate_pages_aligned(
             bs,

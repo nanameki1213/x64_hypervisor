@@ -6,7 +6,7 @@ use console::println;
 
 use super::ept::ViolationError;
 use super::guest_fixed_bits;
-use super::vcpu::{GuestRegs, Vcpu};
+use super::vcpu::{self, GuestRegs, Vcpu};
 use super::vmcs::{self, field};
 use crate::arch::x86_64::cpu::{self, CR4_VMXE};
 
@@ -162,10 +162,31 @@ fn handle_cpuid(regs: &mut GuestRegs) -> ExitAction {
         cpu::cpuid(leaf, subleaf)
     };
 
+    // VMX の制御で有効にできなかった命令は、ゲストで実行すると #UD になるので CPUID でも隠す
+    let secondary = vmcs::read(field::SECONDARY_VM_EXEC_CONTROL) as u32;
+    let disabled = |control: u32| secondary & control == 0;
+
     match leaf {
         1 => {
             r.ecx &= !(1 << 5); // VMX
             r.ecx |= 1 << 31; // hypervisor present
+        }
+        7 if subleaf == 0 => {
+            if disabled(vcpu::CPU2_ENABLE_INVPCID) {
+                r.ebx &= !(1 << 10); // INVPCID
+            }
+            if disabled(vcpu::CPU2_ENABLE_USER_WAIT_PAUSE) {
+                r.ecx &= !(1 << 5); // WAITPKG（UMONITOR / UMWAIT / TPAUSE）
+            }
+            if disabled(vcpu::CPU2_ENABLE_RDTSCP) {
+                r.ecx &= !(1 << 22); // RDPID
+            }
+        }
+        0xd if subleaf == 1 && disabled(vcpu::CPU2_ENABLE_XSAVES) => {
+            r.eax &= !(1 << 3); // XSAVES / XRSTORS
+        }
+        0x8000_0001 if disabled(vcpu::CPU2_ENABLE_RDTSCP) => {
+            r.edx &= !(1 << 27); // RDTSCP
         }
         HV_CPUID_LEAF_BASE => {
             let word = |i: usize| u32::from_le_bytes(HV_SIGNATURE[i..i + 4].try_into().unwrap());
@@ -250,6 +271,20 @@ fn handle_cr_access(regs: &mut GuestRegs) -> ExitAction {
             let actual = (value | fixed.cr0_fixed1) & fixed.cr0_allowed;
             vmcs::write(field::GUEST_CR0, actual);
             vmcs::write(field::CR0_READ_SHADOW, value);
+            // 実機では CR0.PG の切り替えに合わせて EFER.LMA も変わるので、代行する
+            // （VM-entry の "IA-32e mode guest" は再開前に EFER.LMA に合わせる）
+            const CR0_PG: u64 = 1 << 31;
+            const EFER_LME: u64 = 1 << 8;
+            const EFER_LMA: u64 = 1 << 10;
+            let efer = vmcs::read(field::GUEST_IA32_EFER);
+            let new_efer = if actual & CR0_PG != 0 && efer & EFER_LME != 0 {
+                efer | EFER_LMA
+            } else {
+                efer & !EFER_LMA
+            };
+            if new_efer != efer {
+                vmcs::write(field::GUEST_IA32_EFER, new_efer);
+            }
         }
         4 => {
             if value & CR4_VMXE != 0 {

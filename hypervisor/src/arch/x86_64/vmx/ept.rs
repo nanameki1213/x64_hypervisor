@@ -10,7 +10,7 @@ use core::ops::Range;
 use super::alloc_zeroed_page;
 use crate::arch::x86_64::cpu;
 use crate::arch::x86_64::mtrr::{self, Mtrr};
-use crate::mm::{PAGE_SIZE_1G, PAGE_SIZE_4K, align_down, align_up};
+use crate::mm::{MemoryLayout, PAGE_SIZE_1G, PAGE_SIZE_4K, align_down, align_up};
 
 const IA32_VMX_EPT_VPID_CAP: u32 = 0x48c;
 const CAP_WALK_LENGTH_4: u64 = 1 << 6;
@@ -223,6 +223,20 @@ impl Ept {
             }
         }
     }
+}
+
+/// 起動時に管理 VM の EPT で恒等マップする範囲。
+/// 下位 4GiB（MMIO を含む）と UEFI のメモリマップに載っている範囲をまとめてマップし、
+/// それより上（64bit BAR など）は EPT violation のときに遅延マップする
+pub fn initial_identity_range(layout: &MemoryLayout) -> Range<u64> {
+    0..align_up(layout.memory_map_top.max(4 * PAGE_SIZE_1G), PAGE_SIZE_1G)
+}
+
+/// 管理 VM 用の EPT。HV のメモリ以外を恒等マップする
+pub fn management_vm(layout: &MemoryLayout) -> Result<Ept, EptError> {
+    let mut ept = Ept::new(&layout.reserved())?;
+    ept.map_identity(initial_identity_range(layout));
+    Ok(ept)
 }
 
 /// `eptp` に関する TLB とページング構造のキャッシュを無効化する

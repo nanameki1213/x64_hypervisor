@@ -1,0 +1,1 @@
+console=uart8250,io,0x3f8,115200n8 nosmp

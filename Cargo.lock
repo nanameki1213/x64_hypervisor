@@ -11,10 +11,15 @@ name = "allocator"
 version = "0.1.0"
 
 [[package]]
+name = "boot_info"
+version = "0.1.0"
+
+[[package]]
 name = "bootloader"
 version = "0.1.0"
 dependencies = [
  "acpi",
+ "boot_info",
  "console",
  "spin 0.12.1",
 ]
@@ -32,6 +37,7 @@ version = "0.1.0"
 dependencies = [
  "acpi",
  "allocator",
+ "boot_info",
  "console",
  "serial",
  "spin 0.12.1",

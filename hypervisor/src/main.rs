@@ -4,6 +4,7 @@
 extern crate alloc;
 
 use acpi::*;
+use boot_info::BootInfo;
 use console::println;
 use core::alloc::{GlobalAlloc, Layout};
 use core::arch::asm;
@@ -14,6 +15,7 @@ use core::ptr::NonNull;
 use spin::Mutex;
 
 mod arch;
+mod linux;
 mod mm;
 
 /// HV のログ出力先。COM1 は管理 VM のコンソールに譲る
@@ -24,17 +26,11 @@ const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
 /// CPU が VMX に対応していないときに出す文字列。
 /// nested VMX が使えない CI では、`cargo xtask test --allow-no-vmx` がこれを成功とみなす
 const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
+/// 管理 VM が止まったときに出す文字列。起動テストはこれを失敗とみなす
+const GUEST_STOPPED_MARKER: &str = "[hypervisor] management VM stopped";
 
 fn hv_putc(c: u8) {
     serial::write_byte(HV_LOG_PORT, c);
-}
-
-#[derive(Clone, Copy)]
-pub struct BootInfo {
-    pub acpi_xsdt_address: *const u8,
-    pub map_buffer: *const u8,
-    pub map_size: usize,
-    pub descriptor_size: usize,
 }
 
 global_asm!(include_str!("boot.S"), options(att_syntax));
@@ -82,13 +78,14 @@ extern "win64" fn main(boot_info: &BootInfo) {
 
     arch::x86_64::init();
 
-    let layout = unsafe {
-        mm::init(
-            boot_info.map_buffer,
-            boot_info.map_size,
-            boot_info.descriptor_size,
+    let memory_map = unsafe {
+        mm::EfiMemoryMap::new(
+            boot_info.map_buffer as *const u8,
+            boot_info.map_size as usize,
+            boot_info.descriptor_size as usize,
         )
     };
+    let layout = mm::init(&memory_map);
     println!(
         "[mm] image {:#x}-{:#x}, heap {:#x}-{:#x}, memory map top {:#x}",
         layout.image.start,
@@ -110,23 +107,31 @@ extern "win64" fn main(boot_info: &BootInfo) {
         halt_loop();
     }
 
-    let entry_num = (xsdt.header.length as usize - core::mem::size_of::<AcpiTableHeader>())
-        / core::mem::size_of::<*const u64>();
-    let entries =
-        unsafe { core::slice::from_raw_parts(xsdt.entry as *const AcpiTableHeader, entry_num) };
-
-    for entry in entries {
-        if entry.signature == "FADT".as_bytes() {}
-    }
-
-    if let Err(e) = arch::x86_64::vmx::selftest::run(&layout) {
+    if let Err(e) = arch::x86_64::vmx::enable() {
         if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
             println!("{}", VMX_UNAVAILABLE_MARKER);
         }
         panic!("failed to enable VMX: {:?}", e);
     }
+    arch::x86_64::vmx::selftest::run(&layout);
 
     println!("{}", BOOT_OK_MARKER);
+
+    if !boot_info.linux.kernel.is_present() {
+        println!(
+            "[hypervisor] no Linux kernel (bzImage) on the ESP; run `cargo xtask linux` to build one"
+        );
+        halt_loop();
+    }
+    match linux::boot(
+        &boot_info.linux,
+        boot_info.acpi_rsdp_address,
+        &memory_map,
+        &layout,
+    ) {
+        Ok(reason) => println!("{}: {:?}", GUEST_STOPPED_MARKER, reason),
+        Err(e) => panic!("failed to boot the management VM: {:?}", e),
+    }
     halt_loop();
 }
 

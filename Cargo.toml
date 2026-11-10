@@ -5,7 +5,9 @@ members = [
     "support/console",
     "support/allocator",
     "support/serial",
-    "xtask", "support/acpi",
+    "xtask",
+    "support/acpi",
+    "support/boot_info",
 ]
 resolver = "2"
 

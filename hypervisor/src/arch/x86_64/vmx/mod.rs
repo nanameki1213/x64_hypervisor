@@ -2,6 +2,7 @@
 
 pub mod ept;
 mod exit;
+pub use exit::StopReason;
 pub mod selftest;
 pub mod vcpu;
 pub mod vmcs;

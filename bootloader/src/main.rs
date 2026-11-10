@@ -7,6 +7,7 @@ mod elf;
 mod uefi;
 
 use acpi::*;
+use boot_info::{BootInfo, LinuxImage, LoadedFile};
 use console::print;
 use core::arch::asm;
 use core::ffi::c_void;
@@ -20,12 +21,14 @@ pub const KERNEL_ALIGN: usize = 0x200000;
 pub static BOOT_SERVICE: Once<&'static EfiBootServices> = Once::new();
 pub static CON_OUT: Once<&'static EfiSimpleTextOutputProtocol> = Once::new();
 
-pub struct BootInfo {
-    pub acpi_xsdt_address: *const u8,
-    pub map_buffer: *const u8,
-    pub map_size: usize,
-    pub descriptor_size: usize,
-}
+/// ESP のルートに置くファイル（cargo xtask build / cargo xtask linux が配置する）
+const HYPERVISOR_FILE: &str = "hypervisor.elf";
+const LINUX_KERNEL_FILE: &str = "bzImage";
+const LINUX_INITRD_FILE: &str = "initrd.img";
+const LINUX_CMDLINE_FILE: &str = "cmdline.txt";
+
+/// HV が管理 VM の起動前にアクセスするので、ファイルは 4GiB 未満に読み込む
+const LOAD_MAX_ADDRESS: EfiPhysicalAddress = 0xffff_ffff;
 
 pub struct MemoryMap {
     pub buffer: *mut u8,
@@ -306,63 +309,29 @@ pub unsafe extern "efiapi" fn efi_main(
         Err(err) => panic!("failed to open root directory: {:?}", err),
     };
 
-    let mut hypervisor_file: *mut EfiFileProtocol = core::ptr::null_mut();
-
-    // "hypervisor.elf" を UTF-16 に変換（NUL 終端込みで 15 要素）
-    let mut hypervisor_name = [0u16; 15];
-    for (i, c) in "hypervisor.elf".encode_utf16().enumerate() {
-        hypervisor_name[i] = c;
-    }
-    let status = unsafe {
-        ((*root_dir).open)(
-            root_dir,
-            &raw mut hypervisor_file,
-            hypervisor_name.as_ptr(),
-            open_mode::READ,
-            0,
-        )
+    let hypervisor = match load_file(&bs, root_dir, HYPERVISOR_FILE) {
+        Ok(Some(file)) => file,
+        Ok(None) => panic!("{} is not found on the ESP", HYPERVISOR_FILE),
+        Err(err) => panic!("failed to load {}: {:?}", HYPERVISOR_FILE, err),
     };
-    if EfiStatus::is_error(status) {
-        panic!("failed to open hypervisor: {:?}", status);
-    }
-
-    let mut file_info_size = core::mem::size_of::<EfiFileInfo>() + core::mem::size_of::<u16>() * 15;
-    let file_info_buffer_ptr = match bs.allocate_pool(EfiMemoryType::LoaderData, file_info_size) {
-        Ok(ptr) => ptr as *mut c_void,
-        Err(err) => panic!("failed to allocate memory: {:?}", err),
+    let load_optional = |name: &str| match load_file(&bs, root_dir, name) {
+        Ok(Some(file)) => {
+            print!(
+                "loaded {} at {:#x} ({} bytes)\r\n",
+                name, file.address, file.size
+            );
+            file
+        }
+        Ok(None) => LoadedFile::NONE,
+        Err(err) => panic!("failed to load {}: {:?}", name, err),
     };
-    unsafe {
-        ((*hypervisor_file).get_info)(
-            hypervisor_file,
-            &raw const EFI_FILE_INFO_ID,
-            &raw mut file_info_size,
-            file_info_buffer_ptr,
-        );
-    }
-
-    let file_info = file_info_buffer_ptr as *mut EfiFileInfo;
-    let mut hypervisor_file_size = unsafe { (*file_info).file_size };
-
-    let hypervisor_base_addr: EfiPhysicalAddress = match bs.allocate_any_pages(
-        EfiMemoryType::LoaderData,
-        (hypervisor_file_size as usize).div_ceil(0x1000),
-    ) {
-        Ok(addr) => addr,
-        Err(err) => panic!("failed to allocate memory for hypervisor: {:?}", err),
+    let linux = LinuxImage {
+        kernel: load_optional(LINUX_KERNEL_FILE),
+        initrd: load_optional(LINUX_INITRD_FILE),
+        cmdline: load_optional(LINUX_CMDLINE_FILE),
     };
 
-    let status = unsafe {
-        ((*hypervisor_file).read)(
-            hypervisor_file,
-            &raw mut hypervisor_file_size as *mut usize,
-            hypervisor_base_addr as *mut c_void,
-        )
-    };
-    if EfiStatus::is_error(status) {
-        panic!("failed to read hypervisor file: {:?}", status);
-    }
-
-    let entry_address = load_elf(hypervisor_base_addr as *const u64, &bs);
+    let entry_address = load_elf(hypervisor.address as *const u64, &bs);
 
     let config_table = unsafe {
         core::slice::from_raw_parts(
@@ -371,7 +340,8 @@ pub unsafe extern "efiapi" fn efi_main(
         )
     };
 
-    let mut xsdt_address = core::ptr::null();
+    let mut rsdp_address = 0;
+    let mut xsdt_address = 0;
     for config in config_table {
         if config.vendor_guid == EFI_ACPI_RSDP_STRUCTURE_GUID {
             let rsdp = unsafe { &*(config.vendor_table as *const RootSystemDescriptionPointer) };
@@ -382,7 +352,8 @@ pub unsafe extern "efiapi" fn efi_main(
             } {
                 panic!("RSDP is invalid!");
             }
-            xsdt_address = rsdp.xsdt_address as *const u8;
+            rsdp_address = config.vendor_table as u64;
+            xsdt_address = rsdp.xsdt_address;
         }
     }
 
@@ -397,10 +368,12 @@ pub unsafe extern "efiapi" fn efi_main(
     };
 
     let boot_info = BootInfo {
+        acpi_rsdp_address: rsdp_address,
         acpi_xsdt_address: xsdt_address,
-        map_buffer: memmap.buffer,
-        map_size: memmap.map_size,
-        descriptor_size: memmap.descriptor_size,
+        map_buffer: memmap.buffer as u64,
+        map_size: memmap.map_size as u64,
+        descriptor_size: memmap.descriptor_size as u64,
+        linux,
     };
 
     let entry_point: unsafe extern "C" fn(boot_info: &BootInfo) =
@@ -439,6 +412,65 @@ fn open_root_dir(
     Ok(root)
 }
 
+/// ESP のルートにある `name` を、4GiB 未満の LoaderData のページに読み込む。
+/// ファイルがない、または空のときは None を返す
+fn load_file(
+    bs: &BootServices,
+    root: *mut EfiFileProtocol,
+    name: &str,
+) -> Result<Option<LoadedFile>, UefiError> {
+    let mut name16 = [0u16; 64];
+    assert!(name.len() < name16.len(), "file name is too long: {}", name);
+    for (i, c) in name.encode_utf16().enumerate() {
+        name16[i] = c;
+    }
+
+    let mut file: *mut EfiFileProtocol = core::ptr::null_mut();
+    let status =
+        unsafe { ((*root).open)(root, &raw mut file, name16.as_ptr(), open_mode::READ, 0) };
+    if status == EfiStatus::NotFound {
+        return Ok(None);
+    }
+    efi_status_to_result(status)?;
+
+    let result = (|| {
+        // EFI_FILE_INFO の後ろにファイル名が続くので、余裕を持たせる
+        let mut info = [0u64; 64];
+        let mut info_size = core::mem::size_of_val(&info);
+        let status = unsafe {
+            ((*file).get_info)(
+                file,
+                &raw const EFI_FILE_INFO_ID,
+                &raw mut info_size,
+                info.as_mut_ptr() as *mut c_void,
+            )
+        };
+        efi_status_to_result(status)?;
+        let file_size = unsafe { (*(info.as_ptr() as *const EfiFileInfo)).file_size } as usize;
+        if file_size == 0 {
+            return Ok(None);
+        }
+
+        let address = bs.allocate_pages_below(
+            EfiMemoryType::LoaderData,
+            file_size.div_ceil(EFI_PAGE_SIZE),
+            LOAD_MAX_ADDRESS,
+        )?;
+        let mut read_size = file_size;
+        let status = unsafe { ((*file).read)(file, &raw mut read_size, address as *mut c_void) };
+        efi_status_to_result(status)?;
+        if read_size != file_size {
+            return Err(UefiError(EfiStatus::DeviceError));
+        }
+        Ok(Some(LoadedFile {
+            address,
+            size: file_size as u64,
+        }))
+    })();
+    unsafe { ((*file).close)(file) };
+    result
+}
+
 fn allocate_pages_aligned(
     bs: &BootServices,
     memory_type: EfiMemoryType,
@@ -459,6 +491,8 @@ fn allocate_pages_aligned(
         let tail = slack - head;
         if head > 0 {
             bs.free_pages(addr, head)?;
+        }
+        if tail > 0 {
             bs.free_pages((aligned + (pages * EFI_PAGE_SIZE)) as u64, tail)?;
         }
     }

@@ -6,19 +6,18 @@
 //!    入れ、最後に HV のヒープを読んで EPT violation で止められる
 //!
 //! ゲストが HV のイメージを使うため、テストゲストの EPT では HV のヒープだけを隠す。
-//! TODO(#6): 管理 VM（Linux）を起動するようになったら起動経路から外す
+//!
+//! 数ミリ秒で終わり、実機でも VT-x / EPT の前提が成り立つかを管理 VM の起動前に確かめられるので、
+//! 起動のたびに実行している。CI（nested VMX なし）ではここまで到達しない。
 
 use core::arch::global_asm;
-use core::ops::Range;
 
 use console::println;
 
-use super::VmxInitError;
-use super::ept::Ept;
+use super::ept::{self, Ept};
 use super::exit::StopReason;
 use super::vcpu::{GuestConfig, Vcpu};
-use crate::arch::x86_64::cpu;
-use crate::mm::{MemoryLayout, PAGE_SIZE_1G, align_up};
+use crate::mm::{MemoryLayout, PAGE_SIZE_1G};
 
 /// テストゲストが R12 に立てるビット
 const CHECK_HV_SIGNATURE: u64 = 1 << 0;
@@ -120,20 +119,13 @@ vmx_selftest_guest:
     options(att_syntax)
 );
 
-/// 起動時に管理 VM の EPT で恒等マップする範囲。
-/// 下位 4GiB（MMIO を含む）と UEFI のメモリマップに載っている範囲をまとめてマップし、
-/// それより上（64bit BAR など）は EPT violation のときに遅延マップする
-pub fn initial_identity_range(layout: &MemoryLayout) -> Range<u64> {
-    0..align_up(layout.memory_map_top.max(4 * PAGE_SIZE_1G), PAGE_SIZE_1G)
-}
-
 /// 管理 VM 用の EPT で、HV のメモリが隠れていて、それ以外が恒等マップされていることを確認する
 fn check_management_vm_ept(layout: &MemoryLayout) {
     let reserved = layout.reserved();
     let is_reserved = |gpa: u64| reserved.iter().any(|r| r.contains(&gpa));
 
     let mut ept = Ept::new(&reserved).expect("EPT is not supported");
-    let range = initial_identity_range(layout);
+    let range = ept::initial_identity_range(layout);
     ept.map_identity(range.clone());
 
     for r in &reserved {
@@ -173,23 +165,21 @@ fn check_management_vm_ept(layout: &MemoryLayout) {
     );
 }
 
-pub fn run(layout: &MemoryLayout) -> Result<(), VmxInitError> {
-    super::enable()?;
-
+/// VMX を有効にした（`vmx::enable`）後に呼ぶこと。失敗したら panic する
+pub fn run(layout: &MemoryLayout) {
     check_management_vm_ept(layout);
 
     let mut ept = Ept::new(core::slice::from_ref(&layout.heap)).expect("EPT is not supported");
-    let initial = initial_identity_range(layout);
+    let initial = ept::initial_identity_range(layout);
     ept.map_identity(initial.clone());
     let lazy_gpa = initial.end + PAGE_SIZE_1G;
     assert!(ept.translate(lazy_gpa).is_none());
 
-    let config = GuestConfig {
-        rip: vmx_selftest_guest as *const () as u64,
-        rsp: (&raw const GUEST_STACK) as u64 + GUEST_STACK_SIZE as u64,
-        cr3: cpu::read_cr3(),
-        hlt_exiting: true,
-    };
+    let config = GuestConfig::mirror_host(
+        vmx_selftest_guest as *const () as u64,
+        (&raw const GUEST_STACK) as u64 + GUEST_STACK_SIZE as u64,
+        true,
+    );
     let mut vcpu = Vcpu::new(&config, ept);
     vcpu.regs.r13 = lazy_gpa;
     vcpu.regs.r14 = layout.heap.start;
@@ -207,5 +197,4 @@ pub fn run(layout: &MemoryLayout) -> Result<(), VmxInitError> {
     }
     assert_eq!(vcpu.ept.translate(lazy_gpa), Some(lazy_gpa));
     println!("[vmx] self test passed (checks={:#x})", checks);
-    Ok(())
 }
