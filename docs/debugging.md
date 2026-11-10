@@ -32,7 +32,9 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
 
 ### 起動テスト（`cargo xtask test`）
 
-- HV は VMX を有効にし、最小のテストゲスト（`vmx/selftest.rs`）で CPUID / VMCALL / CR4 / XSETBV の exit 処理を確認してから `[hypervisor] boot ok` を出す
+- HV は VMX を有効にし、`vmx/selftest.rs` で次を確認してから `[hypervisor] boot ok` を出す
+  - 管理 VM 用の EPT で HV のメモリがマップされておらず、それ以外が恒等マップされていること
+  - 最小のテストゲストで CPUID / VMCALL / CR4 / XSETBV の exit 処理、EPT の遅延マップ、HV のヒープへのアクセスが EPT violation で止められること（このときゲスト状態のダンプが出るが、想定どおりの動作）
 - HV のログに `[hypervisor] boot ok` が出れば成功
 - `[PANIC]` か `[EXCEPTION]` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
 - `--allow-no-vmx`: CPU が VMX に対応していない場合、HV が `[hypervisor] VMX is not available on this CPU` を出した時点で成功とする

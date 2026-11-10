@@ -4,7 +4,8 @@
 
 use console::println;
 
-use super::fixed_bits;
+use super::ept::ViolationError;
+use super::guest_fixed_bits;
 use super::vcpu::{GuestRegs, Vcpu};
 use super::vmcs::{self, field};
 use crate::arch::x86_64::cpu::{self, CR4_VMXE};
@@ -27,6 +28,8 @@ pub enum ExitAction {
 pub enum StopReason {
     /// 割り込み禁止のまま HLT した（ゲストが自ら停止した）
     GuestHalted,
+    /// HV が使う物理メモリにアクセスした
+    HvMemoryAccess { gpa: u64 },
     /// 処理できない exit や VM-entry の失敗
     Fatal,
 }
@@ -49,6 +52,8 @@ mod reason {
     pub const INVALID_GUEST_STATE: u32 = 33;
     pub const MSR_LOADING: u32 = 34;
     pub const MACHINE_CHECK: u32 = 41;
+    pub const EPT_VIOLATION: u32 = 48;
+    pub const EPT_MISCONFIG: u32 = 49;
     pub const INVEPT: u32 = 50;
     pub const INVVPID: u32 = 53;
     pub const XSETBV: u32 = 55;
@@ -76,6 +81,7 @@ pub fn handle(vcpu: &mut Vcpu) -> ExitAction {
         reason::VMCALL => handle_vmcall(&mut vcpu.regs),
         reason::HLT => handle_hlt(),
         reason::CR_ACCESS => handle_cr_access(&mut vcpu.regs),
+        reason::EPT_VIOLATION => handle_ept_violation(vcpu),
         reason::RDMSR | reason::WRMSR => {
             // MSR ビットマップで捕捉した MSR（VMX MSR）と、ビットマップの範囲外の MSR。
             // どちらもゲストには存在しないものとして扱う
@@ -100,7 +106,8 @@ pub fn handle(vcpu: &mut Vcpu) -> ExitAction {
         | reason::SIPI
         | reason::INVALID_GUEST_STATE
         | reason::MSR_LOADING
-        | reason::MACHINE_CHECK) => {
+        | reason::MACHINE_CHECK
+        | reason::EPT_MISCONFIG) => {
             println!("[vmx] unhandled exit: reason={}", r);
             dump_guest_state(vcpu);
             ExitAction::Stop(StopReason::Fatal)
@@ -236,19 +243,11 @@ fn handle_cr_access(regs: &mut GuestRegs) -> ExitAction {
         return ExitAction::Stop(StopReason::Fatal);
     }
 
-    let fixed = fixed_bits();
+    let fixed = guest_fixed_bits();
     match cr {
         0 => {
+            // VMX で固定されたビット（NE など）は実際の CR0 では強制し、ゲストには書いた値を見せる
             let actual = (value | fixed.cr0_fixed1) & fixed.cr0_allowed;
-            if actual != value {
-                // unrestricted guest なしでは PE / PG を落とせない
-                // TODO(#9): EPT と unrestricted guest を有効にしたら PE / PG を許可する
-                println!(
-                    "[vmx] guest tried to set CR0 to {:#x}, which VMX does not allow",
-                    value
-                );
-                return ExitAction::Stop(StopReason::Fatal);
-            }
             vmcs::write(field::GUEST_CR0, actual);
             vmcs::write(field::CR0_READ_SHADOW, value);
         }
@@ -269,6 +268,26 @@ fn handle_cr_access(regs: &mut GuestRegs) -> ExitAction {
     }
     skip_instruction();
     ExitAction::Resume
+}
+
+fn handle_ept_violation(vcpu: &mut Vcpu) -> ExitAction {
+    let gpa = vmcs::read(field::GUEST_PHYSICAL_ADDRESS);
+    match vcpu.ept.handle_violation(gpa) {
+        Ok(()) => ExitAction::Resume,
+        Err(ViolationError::HvMemory) => {
+            println!("[vmx] guest accessed HV memory: gpa={:#x}", gpa);
+            dump_guest_state(vcpu);
+            ExitAction::Stop(StopReason::HvMemoryAccess { gpa })
+        }
+        Err(ViolationError::AlreadyMapped) => {
+            println!(
+                "[vmx] unexpected EPT violation on a mapped page: gpa={:#x}",
+                gpa
+            );
+            dump_guest_state(vcpu);
+            ExitAction::Stop(StopReason::Fatal)
+        }
+    }
 }
 
 /// XSETBV は無条件に exit する。ホストで実行して #GP にならないよう、値を検証してから実行する

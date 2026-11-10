@@ -9,8 +9,10 @@ SECTIONS
 {
   . = KERNEL_OFFSET + KERNEL_PHYS;
 
+  __hv_image_start = .;
+
   .text : AT(ADDR(.text) - KERNEL_OFFSET) {
-    *(.text.boot) 
+    *(.text.boot)
     *(.text .text.*)
   }
 
@@ -46,6 +48,9 @@ SECTIONS
     *(.bss .bss.*)
     *(COMMON)
   }
+
+  . = ALIGN(4096);
+  __hv_image_end = .;
 
   /DISCARD/ : {
     *(.interp)

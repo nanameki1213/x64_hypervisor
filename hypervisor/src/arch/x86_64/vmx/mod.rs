@@ -1,5 +1,6 @@
 //! Intel VT-x の基盤
 
+pub mod ept;
 mod exit;
 pub mod selftest;
 pub mod vcpu;
@@ -27,8 +28,8 @@ const PAGE_SIZE: usize = 4096;
 
 /// VMXON 領域や VMCS 用に、ゼロクリアした 4KiB の物理ページを確保する。
 ///
-/// ヒープは恒等マップされた物理メモリなので、返り値はそのまま物理アドレスとして使える。
-/// TODO(#9): 物理ページアロケータと HV のアドレス空間を整理したら置き換える
+/// ヒープは直接マップ（恒等マップ）の範囲にあるので、返り値はそのまま物理アドレスとして使える
+/// （docs/memory.md）。
 pub(crate) fn alloc_zeroed_page() -> u64 {
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
@@ -58,6 +59,15 @@ pub(crate) fn fixed_bits() -> FixedBits {
         cr4_fixed1: cpu::rdmsr(cpu::IA32_VMX_CR4_FIXED0),
         cr4_allowed: cpu::rdmsr(cpu::IA32_VMX_CR4_FIXED1),
     }
+}
+
+/// ゲストに適用する固定ビット。unrestricted guest を使うので CR0.PE / PG は固定しない
+pub(crate) fn guest_fixed_bits() -> FixedBits {
+    const CR0_PE: u64 = 1 << 0;
+    const CR0_PG: u64 = 1 << 31;
+    let mut fixed = fixed_bits();
+    fixed.cr0_fixed1 &= !(CR0_PE | CR0_PG);
+    fixed
 }
 
 /// 現在の CPU で VMX root に入る。
