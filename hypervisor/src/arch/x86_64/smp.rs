@@ -174,8 +174,13 @@ extern "C" fn ap_entry(start: &'static ApStart) -> ! {
     );
     start.online.store(true, Ordering::Release);
 
-    if let Err(e) = vmx::enable() {
-        panic!("AP {}: failed to enable VMX: {:?}", start.index, e);
+    match vmx::enable() {
+        Ok(()) => {}
+        // VMX がない環境（CI など）。BSP も同じ理由で止まり、そちらが報告するので、AP は黙って止まる
+        Err(vmx::VmxInitError::NotSupported) => loop {
+            unsafe { asm!("cli", "hlt", options(nomem, nostack)) };
+        },
+        Err(e) => panic!("AP {}: failed to enable VMX: {:?}", start.index, e),
     }
     // BSP が管理 VM の EPT を作るまで待ち、管理 VM の vCPU として SIPI を待つ。
     // 管理 VM の Linux が送った INIT / SIPI は VM exit になり、vCPU の状態に反映される
