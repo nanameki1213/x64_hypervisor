@@ -107,6 +107,14 @@ extern "win64" fn main(boot_info: &BootInfo) {
         halt_loop();
     }
 
+    let cpus = unsafe { arch::x86_64::smp::discover(xsdt) };
+    println!(
+        "[smp] {} CPUs (APIC IDs {:?}), BSP APIC ID {}",
+        cpus.apic_ids.len(),
+        cpus.apic_ids,
+        cpus.bsp_apic_id
+    );
+
     if let Err(e) = arch::x86_64::vmx::enable() {
         if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
             println!("{}", VMX_UNAVAILABLE_MARKER);
