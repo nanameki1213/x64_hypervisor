@@ -40,6 +40,7 @@ OVMF は ConOut をすべてのシリアルに出すので、ブートローダ�
 - ESP に管理 VM のカーネル（`esp/bzImage`、`cargo xtask linux` が置く）があれば、さらに次を確認する
   - 管理 VM のコンソール（`guest.log`）に `[guest] initramfs ok`（`linux/init` が出す）が出ること
   - 管理 VM から見た e820 で、HV のメモリ（HV のログの `[mm]` 行の image / heap）が usable になっていないこと
+  - 管理 VM から見えるオンラインの CPU 数（`linux/init` が出す `[guest] online CPUs: N`）が、HV が起動した CPU 数（`[smp] N CPUs`）と一致し、AP ごとに HV が SIPI の VM exit（`[vmx] SIPI ...`）を処理していること。SMP の確認には `--smp 4` などを付ける
 - `[PANIC]` か `[EXCEPTION]`、`[hypervisor] management VM stopped`（管理 VM が止まった）、管理 VM の `Kernel panic` が出るか、タイムアウト（デフォルト 60 秒、`--timeout` で変更）になれば失敗
 - `--allow-no-vmx`: CPU が VMX に対応していない場合、HV が `[hypervisor] VMX is not available on this CPU` を出した時点で成功とする
   - GitHub Actions のランナーは KVM は使えるが nested VMX は使えないため、CI ではこれを付けて VMX の手前までを確認している

@@ -24,6 +24,7 @@ cargo xtask test           # 管理 VM のシェルの起動まで確認する
 2. **HV**（`hypervisor/src/linux/`）が、VMX のセルフテストの後に管理 VM の初期状態を作る
    - カーネルの配置、boot_params（zero page）、e820、ゲスト用の GDT とページテーブル
 3. 管理 VM 用の EPT（HV のメモリ以外の恒等マップ、[memory.md](memory.md)）で vCPU を作り、64bit エントリ（`code32_start + 0x200`）から実行する
+4. AP は HV の起動時に起こしてあり、管理 VM の vCPU として SIPI を待っている。Linux が AP を起こすと、その CPU で実行が始まる（[smp.md](smp.md)）
 
 ## ブートプロトコル
 
@@ -80,11 +81,9 @@ Linux x86 boot protocol（`Documentation/arch/x86/boot.rst`）の **64bit エン
   - `/init` は proc / sysfs / devtmpfs をマウントし、`[guest] initramfs ok` を出してシェルを起動する。起動テストはこの行を成功判定に使う
 - **cmdline**（`linux/cmdline.txt`）
   - `console=uart8250,io,0x3f8,115200n8`: コンソールを I/O アドレスで指定する。ACPI の列挙順では COM2 が ttyS0 になるため、`console=ttyS0` では HV のログ（COM2）にコンソールが出てしまう
-  - `nosmp`: AP を起動しない。AP の起動（INIT-SIPI-SIPI）をそのまま通すと、AP が VMX の外で Linux を実行してしまう（#8 で対応する）
 
 ## 今のところの制限・課題
 
 - **COM2 が管理 VM から見えている**。Linux は COM2 を ttyS1 として初期化するので、実機では HV のログと衝突しうる（QEMU のファイル出力では問題にならない）。I/O ビットマップと ACPI での隠蔽は #10 で扱う
-- シングルコアのみ（`nosmp`）。割り込みは `nosmp` により 8259 PIC 経由になる（#8）
 - ACPI テーブルは書き換えずにそのまま渡している（#10）
 - VMX の制御で有効にできなかった命令（RDTSCP / RDPID、INVPCID、XSAVES、WAITPKG）は CPUID でも隠している（`exit::handle_cpuid`）。隠さないと Linux がそれを使って #UD になる
