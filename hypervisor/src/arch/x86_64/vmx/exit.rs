@@ -6,7 +6,7 @@ use console::println;
 
 use super::ept::ViolationError;
 use super::guest_fixed_bits;
-use super::vcpu::{self, GuestRegs, Vcpu};
+use super::vcpu::{self, GuestConfig, GuestRegs, Vcpu};
 use super::vmcs::{self, field};
 use crate::arch::x86_64::cpu::{self, CR4_VMXE};
 
@@ -89,6 +89,13 @@ pub fn handle(vcpu: &mut Vcpu) -> ExitAction {
             ExitAction::Resume
         }
         reason::XSETBV => handle_xsetbv(&vcpu.regs),
+        reason::INIT => {
+            // ゲスト（管理 VM）が送った INIT。物理 CPU は VMX non-root のまま VM exit になるので、
+            // vCPU を INIT 直後の状態にして SIPI を待たせる
+            vcpu.reset(&GuestConfig::wait_for_sipi());
+            ExitAction::Resume
+        }
+        reason::SIPI => handle_sipi(),
         reason::INVD => {
             // INVD はキャッシュを書き戻さずに捨てるので、安全な WBINVD で代用する
             cpu::wbinvd();
@@ -102,8 +109,6 @@ pub fn handle(vcpu: &mut Vcpu) -> ExitAction {
         }
         r @ (reason::EXCEPTION_NMI
         | reason::TRIPLE_FAULT
-        | reason::INIT
-        | reason::SIPI
         | reason::INVALID_GUEST_STATE
         | reason::MSR_LOADING
         | reason::MACHINE_CHECK
@@ -328,6 +333,24 @@ fn handle_ept_violation(vcpu: &mut Vcpu) -> ExitAction {
             ExitAction::Stop(StopReason::Fatal)
         }
     }
+}
+
+/// wait-for-SIPI 状態で SIPI を受けた。ベクタ VV なら VV00:0000 から実行を始める
+fn handle_sipi() -> ExitAction {
+    let vector = vmcs::read(field::EXIT_QUALIFICATION) & 0xff;
+    // AP の起動時に 1 回だけ起きる。起動テストは、AP が VMX non-root で動いていることの確認に使う
+    println!(
+        "[vmx] SIPI (vector {:#x}) on APIC ID {}",
+        vector,
+        crate::arch::x86_64::smp::current_apic_id()
+    );
+    vmcs::write(field::GUEST_CS_SELECTOR, vector << 8);
+    vmcs::write(field::GUEST_CS_BASE, vector << 12);
+    vmcs::write(field::GUEST_CS_LIMIT, 0xffff);
+    vmcs::write(field::GUEST_CS_AR_BYTES, vcpu::AR_REAL_CODE as u64);
+    vmcs::write(field::GUEST_RIP, 0);
+    vmcs::write(field::GUEST_ACTIVITY_STATE, vcpu::ACTIVITY_ACTIVE as u64);
+    ExitAction::Resume
 }
 
 /// XSETBV は無条件に exit する。ホストで実行して #GP にならないよう、値を検証してから実行する

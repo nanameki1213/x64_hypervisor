@@ -27,7 +27,7 @@ const BOOT_OK_MARKER: &str = "[hypervisor] boot ok";
 /// nested VMX が使えない CI では、`cargo xtask test --allow-no-vmx` がこれを成功とみなす
 const VMX_UNAVAILABLE_MARKER: &str = "[hypervisor] VMX is not available on this CPU";
 /// 管理 VM が止まったときに出す文字列。起動テストはこれを失敗とみなす
-const GUEST_STOPPED_MARKER: &str = "[hypervisor] management VM stopped";
+pub const GUEST_STOPPED_MARKER: &str = "[hypervisor] management VM stopped";
 
 fn hv_putc(c: u8) {
     serial::write_byte(HV_LOG_PORT, c);
@@ -114,6 +114,8 @@ extern "win64" fn main(boot_info: &BootInfo) {
         cpus.apic_ids,
         cpus.bsp_apic_id
     );
+    let online = unsafe { arch::x86_64::smp::start_aps(&cpus, xsdt, &memory_map, &layout) };
+    println!("[smp] {} of {} APs online", online, cpus.apic_ids.len() - 1);
 
     if let Err(e) = arch::x86_64::vmx::enable() {
         if matches!(e, arch::x86_64::vmx::VmxInitError::NotSupported) {
