@@ -407,7 +407,9 @@ pub fn boot(
     layout: &MemoryLayout,
 ) -> Result<StopReason, LinuxBootError> {
     let prepared = prepare(image, rsdp, memory_map, layout)?;
-    let ept = ept::management_vm(layout).expect("EPT is not supported");
+    let ept = ept::management_vm(layout)
+        .expect("EPT is not supported")
+        .into_shared();
     let mut vcpu = Vcpu::new(&prepared.config, ept);
     // 64bit boot protocol: RSI に boot_params の物理アドレス
     vcpu.regs.rsi = prepared.boot_params;

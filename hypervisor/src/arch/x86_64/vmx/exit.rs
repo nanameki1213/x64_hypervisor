@@ -306,15 +306,20 @@ fn handle_cr_access(regs: &mut GuestRegs) -> ExitAction {
 }
 
 fn handle_ept_violation(vcpu: &mut Vcpu) -> ExitAction {
+    // exit qualification の bit 3〜5: violation の時点で EPT エントリが読み・書き・実行を許していたか
+    const ENTRY_PERMISSIONS: u64 = 0b111 << 3;
     let gpa = vmcs::read(field::GUEST_PHYSICAL_ADDRESS);
-    match vcpu.ept.handle_violation(gpa) {
+    let was_present = vmcs::read(field::EXIT_QUALIFICATION) & ENTRY_PERMISSIONS != 0;
+    // ロックはこの文の終わりで外れる（ダンプ中に持たないようにする）
+    let result = vcpu.ept.lock().handle_violation(gpa, was_present);
+    match result {
         Ok(()) => ExitAction::Resume,
         Err(ViolationError::HvMemory) => {
             println!("[vmx] guest accessed HV memory: gpa={:#x}", gpa);
             dump_guest_state(vcpu);
             ExitAction::Stop(StopReason::HvMemoryAccess { gpa })
         }
-        Err(ViolationError::AlreadyMapped) => {
+        Err(ViolationError::PermissionViolation) => {
             println!(
                 "[vmx] unexpected EPT violation on a mapped page: gpa={:#x}",
                 gpa
