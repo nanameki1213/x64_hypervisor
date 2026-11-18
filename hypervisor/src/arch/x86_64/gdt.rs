@@ -31,11 +31,19 @@ struct DescriptorTablePointer {
 #[repr(C, align(16))]
 struct IstStack([u8; IST_STACK_SIZE]);
 
+// null, kernel code, kernel data, TSS (16 バイト = 2 エントリ。load で設定する)
+const GDT_TEMPLATE: [u64; 5] = [
+    0,
+    0x00af_9a00_0000_ffff, // 64bit code, DPL0
+    0x00cf_9200_0000_ffff, // data, DPL0
+    0,
+    0,
+];
+
 /// CPU ごとに必要な GDT / TSS / IST スタック。
 /// TSS ディスクリプタの busy ビットは CPU ごとに立つので、GDT も CPU ごとに持つ
 #[repr(C)]
 pub struct CpuTables {
-    // null, kernel code, kernel data, TSS (16 バイト = 2 エントリ)
     gdt: [u64; 5],
     tss: Tss,
     double_fault_stack: IstStack,
@@ -45,13 +53,7 @@ pub struct CpuTables {
 impl CpuTables {
     pub const fn new() -> Self {
         CpuTables {
-            gdt: [
-                0,
-                0x00af_9a00_0000_ffff, // 64bit code, DPL0
-                0x00cf_9200_0000_ffff, // data, DPL0
-                0,
-                0,
-            ],
+            gdt: GDT_TEMPLATE,
             tss: Tss {
                 _reserved0: 0,
                 rsp: [0; 3],
@@ -76,8 +78,12 @@ pub fn init() {
     load(unsafe { (&raw mut BSP_TABLES).as_mut() }.unwrap());
 }
 
-/// 現在の CPU に `tables` の GDT / TSS を読み込む。`tables` はこの CPU 専用で、以後解放しないこと
+/// 現在の CPU に `tables` の GDT / TSS を読み込む。`tables` はこの CPU 専用で、以後解放しないこと。
+/// ディスクリプタはここで設定するので、`tables` はゼロ初期化したものでもよい
 pub fn load(tables: &'static mut CpuTables) {
+    // CpuTables::new() はスタック上に IST スタックごと作ってしまうので、必要な値だけを書く
+    tables.gdt = GDT_TEMPLATE;
+    tables.tss.iomap_base = size_of::<Tss>() as u16;
     unsafe {
         let tss = &raw mut tables.tss;
         (*tss).ist[(IST_DOUBLE_FAULT - 1) as usize] =
